@@ -1,0 +1,64 @@
+repos:
+    # Prevent direct pushes to main
+  - repo: local
+    hooks:
+      - id: prevent-commit-to-main
+        name: Prevent commits to main
+        entry: bash -c 'branch="$(git rev-parse --abbrev-ref HEAD)"; if [ "$branch" = "main" ]; then echo "❌ Commits directly to main are blocked."; exit 1; fi'
+        language: system
+        stages: [pre-commit]
+
+  # Formatting
+  - repo: https://github.com/psf/black
+    rev: 24.4.0
+    hooks:
+      - id: black   # auto-formats
+
+  # Lint + auto-fix
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.4
+    hooks:
+      - id: ruff
+        args: ["--fix"]   # enable auto-fix
+      - id: ruff-format   # formatter
+
+  # Security (no auto-fix anyway)
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.8
+    hooks:
+      - id: bandit
+
+  # Type checking
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.10.0
+    hooks:
+      - id: mypy
+
+  # General file hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-yaml
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  # Dockerfile linting
+  # - repo: https://github.com/hadolint/hadolint
+  #   rev: v2.12.0
+  #   hooks:
+  #     - id: hadolint
+  #       args: ["--ignore", "DL3008"]
+  # - repo: https://github.com/hadolint/hadolint
+  #   rev: v2.12.0
+  #   hooks:
+  #     - id: hadolint
+
+
+# USAGE
+## Install pre-commit in venv: pip install pre-commit or uv
+## Rename the file to .pre-commit-config.yaml
+## Install pre-commit hooks: pre-commit install
+## Run on all files: pre-commit run --all-files
+
+## NOTE: RUN BEFORE EACH COMMIT TO CATCH ISSUES EARLY
