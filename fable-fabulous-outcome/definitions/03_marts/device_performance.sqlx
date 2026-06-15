@@ -1,0 +1,118 @@
+config {
+  type: "incremental",
+  name: "gold_device_performance",
+  schema: dataform.projectConfig.vars.gold_dataset,
+  description: schema_03_marts.gold_device_performance.description,
+  columns: schema_03_marts.gold_device_performance.columns,
+  partitionBy: "month",
+  clusterBy: ["device_class"],
+  tags: ["gold", "device", "monthly", "daily"],
+  assertions: {
+    uniqueKey: ["month", "device_class"],
+    nonNull: ["month", "device_class", "traffic"],
+    rowConditions: [
+      "orders >= 0 AND revenue_usd >= 0 AND quantity >= 0",
+      "unique_product_viewers <= traffic",
+      "bounce_rate_flag_pct IS NULL OR (bounce_rate_flag_pct BETWEEN 0 AND 100)",
+      "bounce_rate_3cond_pct IS NULL OR (bounce_rate_3cond_pct BETWEEN 0 AND 100)"
+    ]
+  }
+}
+
+pre_operations {
+  ${when(incremental(), `DELETE FROM ${self()} WHERE month >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+}
+
+WITH session_metrics AS (
+
+  SELECT
+    ${date_utils.monthStart("session_date")}                            AS month,
+    IF(GROUPING(gs.device_class) = 1, 'Total', gs.device_class)         AS device_class,
+    COUNT(*)                                                            AS sessions,
+    ${bounce_rate.bounceRatePct("is_bounced_flag", "COUNT(*)")}         AS bounce_rate_flag_pct,
+    ${bounce_rate.bounceRatePct("is_bounced_3cond", "COUNT(*)")}        AS bounce_rate_3cond_pct
+  FROM ${ref("int_ga4_sessions")} AS gs
+  ${when(incremental(), `WHERE session_date >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+  GROUP BY GROUPING SETS ((month, gs.device_class), (month))
+),
+
+event_metrics AS (
+
+  SELECT
+    ${date_utils.monthStart("event_date")}                              AS month,
+    IF(GROUPING(ge.device_class) = 1, 'Total', ge.device_class)         AS device_class,
+    -- the workbook's Traffic column is distinct users, not sessions
+    COUNT(DISTINCT user_pseudo_id)                                      AS traffic,
+    COUNTIF(event_name = 'view_item')                                   AS product_views,
+    COUNTIF(event_name = 'add_to_cart')                                 AS add_to_cart,
+    COUNT(DISTINCT IF(event_name = 'view_item', user_pseudo_id, NULL))  AS unique_product_viewers,
+    COUNT(DISTINCT IF(event_name = 'add_to_cart', user_pseudo_id, NULL)) AS unique_cart_users,
+    -- orders, quantity and revenue stay event-based: distinct transaction
+    -- ids and summed event figures per month/device is how GA4's reports
+    -- and the QA's raw queries count, so the mart reconciles with both
+    ${sql_metrics.distinctOrders("event_name", "transaction_id")}       AS orders,
+    SUM(IF(event_name = 'purchase', COALESCE(item_quantity, 0), 0))     AS quantity,
+    ROUND(SUM(IF(event_name = 'purchase', COALESCE(revenue_local, 0), 0)), 2) AS revenue_local,
+    ROUND(SUM(IF(event_name = 'purchase', COALESCE(revenue_usd, 0), 0)), 2)   AS revenue_usd
+  FROM ${ref("stg_ga4_events")} AS ge
+  ${when(incremental(), `WHERE event_date >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+  GROUP BY GROUPING SETS ((month, ge.device_class), (month))
+),
+
+combined AS (
+
+  SELECT
+    e.month,
+    e.device_class,
+    e.traffic,
+    COALESCE(s.sessions, 0)                                             AS sessions,
+    e.product_views,
+    e.add_to_cart,
+    s.bounce_rate_flag_pct,
+    s.bounce_rate_3cond_pct,
+    e.unique_product_viewers,
+    e.unique_cart_users,
+    e.orders,
+    e.quantity,
+    e.revenue_local,
+    e.revenue_usd
+  FROM event_metrics AS e
+  LEFT JOIN session_metrics AS s USING (month, device_class)
+)
+
+SELECT
+  month,
+  device_class,
+  traffic,
+  sessions,
+  product_views,
+  add_to_cart,
+  bounce_rate_flag_pct,
+  bounce_rate_3cond_pct,
+  orders,
+  quantity,
+  revenue_local,
+  revenue_usd,
+  ${sql_metrics.pct("orders", "traffic", 4)}                            AS conversion_pct,
+  ${sql_metrics.ratio("revenue_local", "NULLIF(orders, 0)")}            AS ticket_size_local,
+  ${sql_metrics.ratio("revenue_usd", "NULLIF(orders, 0)")}              AS ticket_size_usd,
+
+  -- revenue share of the month, denominator = the Total row
+  ${sql_metrics.pct(
+    "revenue_usd",
+    "MAX(IF(device_class = 'Total', revenue_usd, NULL)) OVER (PARTITION BY month)")} AS contribution_pct,
+
+  unique_product_viewers,
+  unique_cart_users,
+
+  ${sql_metrics.pct(
+    "traffic",
+    "MAX(IF(device_class = 'Total', traffic, NULL)) OVER (PARTITION BY month)")}     AS traffic_contribution_pct,
+
+  -- funnel ratios are user-on-user (both sides distinct users)
+  ${sql_metrics.pct("unique_product_viewers", "traffic")}               AS product_view_per_traffic_pct,
+  ${sql_metrics.pct("unique_cart_users", "unique_product_viewers")}     AS cart_per_product_view_pct,
+
+  IF(device_class = 'Total', 0, 1)                                      AS row_sort
+
+FROM combined

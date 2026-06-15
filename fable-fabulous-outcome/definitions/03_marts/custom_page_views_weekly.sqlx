@@ -1,0 +1,32 @@
+config {
+  type: "incremental",
+  name: "gold_custom_page_views_weekly",
+  schema: dataform.projectConfig.vars.gold_dataset,
+  description: schema_03_marts.gold_custom_page_views_weekly.description,
+  columns: schema_03_marts.gold_custom_page_views_weekly.columns,
+  partitionBy: "week_start_date",
+  clusterBy: ["page_name"],
+  tags: ["gold", "pages", "weekly", "daily"],
+  assertions: {
+    uniqueKey: ["week_start_date", "page_name"],
+    nonNull: ["week_start_date", "page_name", "page_views_total"],
+    rowConditions: [
+      "unique_visitors_total <= page_views_total",
+      "exit_rate_total IS NULL OR (exit_rate_total BETWEEN 0 AND 100)",
+      "bounce_rate_flag_total IS NULL OR (bounce_rate_flag_total BETWEEN 0 AND 100)"
+    ]
+  }
+}
+
+pre_operations {
+  ${when(incremental(), `DELETE FROM ${self()} WHERE week_start_date >= ${date_utils.weekStart(date_utils.lookbackDate())}`)}
+}
+
+${page_views_mart.weeklyPageMatrix({
+  stgEvents: ref("stg_ga4_events"),
+  sessions: ref("int_ga4_sessions"),
+  eventWindow: when(incremental(), `AND event_date >= ${date_utils.weekStart(date_utils.lookbackDate())}`),
+  pageDimSql: `COALESCE(page_type, 'Others')`,
+  pageFilterSql: `TRUE`,
+  pageColumnName: "page_name"
+})}

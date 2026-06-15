@@ -1,0 +1,123 @@
+config {
+  type: "incremental",
+  name: "gold_city_performance",
+  schema: dataform.projectConfig.vars.gold_dataset,
+  description: schema_03_marts.gold_city_performance.description,
+  columns: schema_03_marts.gold_city_performance.columns,
+  partitionBy: "month",
+  clusterBy: ["city_display"],
+  tags: ["gold", "city", "monthly", "daily"],
+  assertions: {
+    uniqueKey: ["month", "city_display"],
+    nonNull: ["month", "city_display", "visits", "unique_visitors"],
+    rowConditions: [
+      "unique_visitors <= visits",
+      "orders >= 0 AND revenue_usd >= 0",
+      "bounce_rate_flag_pct IS NULL OR (bounce_rate_flag_pct BETWEEN 0 AND 100)",
+      "bounce_rate_3cond_pct IS NULL OR (bounce_rate_3cond_pct BETWEEN 0 AND 100)",
+      "contribution_pct IS NULL OR (contribution_pct BETWEEN 0 AND 100)"
+    ]
+  }
+}
+
+pre_operations {
+  ${when(incremental(), `DELETE FROM ${self()} WHERE month >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+}
+
+WITH session_metrics AS (
+
+  SELECT
+    ${date_utils.monthStart("session_date")}                            AS month,
+    IF(GROUPING(geo_city) = 1, 'Total', geo_city)                       AS city,
+    IF(GROUPING(geo_region) = 1, 'Total', geo_region)                   AS state,
+    IF(GROUPING(geo_country) = 1, 'Total', geo_country)                 AS country,
+    COUNT(*)                                                            AS visits,
+    ${bounce_rate.bounceRatePct("is_bounced_flag", "COUNT(*)")}         AS bounce_rate_flag_pct,
+    ${bounce_rate.bounceRatePct("is_bounced_3cond", "COUNT(*)")}        AS bounce_rate_3cond_pct
+  FROM ${ref("int_ga4_sessions")}
+  ${when(incremental(), `WHERE session_date >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+  GROUP BY GROUPING SETS ((month, geo_city, geo_region, geo_country), (month))
+),
+
+event_metrics AS (
+
+  SELECT
+    ${date_utils.monthStart("event_date")}                              AS month,
+    IF(GROUPING(geo_city) = 1, 'Total', geo_city)                       AS city,
+    IF(GROUPING(geo_region) = 1, 'Total', geo_region)                   AS state,
+    IF(GROUPING(geo_country) = 1, 'Total', geo_country)                 AS country,
+    COUNT(DISTINCT user_pseudo_id)                                      AS unique_visitors,
+    COUNTIF(event_name = 'view_item')                                   AS product_detail_views,
+    COUNTIF(event_name = 'add_to_wishlist')                             AS add_to_wishlist,
+    COUNTIF(event_name = 'add_to_cart')                                 AS add_to_cart,
+    -- orders and revenue stay event-based: distinct transaction ids and
+    -- summed event revenue per month/city is how GA4's reports and the
+    -- QA's raw queries count, so the mart reconciles with both
+    ${sql_metrics.distinctOrders("event_name", "transaction_id")}       AS orders,
+    ROUND(SUM(IF(event_name = 'purchase', COALESCE(revenue_local, 0), 0)), 2) AS revenue_local,
+    ROUND(SUM(IF(event_name = 'purchase', COALESCE(revenue_usd, 0), 0)), 2)   AS revenue_usd
+  FROM ${ref("stg_ga4_events")}
+  ${when(incremental(), `WHERE event_date >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+  GROUP BY GROUPING SETS ((month, geo_city, geo_region, geo_country), (month))
+),
+
+combined AS (
+
+  SELECT
+    e.month,
+    -- 'Delhi (Delhi, India)' style label the sheet pivots on
+    IF(e.city = 'Total', 'Total',
+       CONCAT(e.city, ' (', e.state, ', ', e.country, ')'))             AS city_display,
+    e.city,
+    e.state,
+    e.country,
+    COALESCE(s.visits, 0)                                               AS visits,
+    e.unique_visitors,
+    e.product_detail_views,
+    e.add_to_wishlist,
+    e.add_to_cart,
+    s.bounce_rate_flag_pct,
+    s.bounce_rate_3cond_pct,
+    e.orders,
+    e.revenue_local,
+    e.revenue_usd
+  FROM event_metrics AS e
+  LEFT JOIN session_metrics AS s USING (month, city, state, country)
+)
+
+SELECT
+  month,
+  city_display,
+  city,
+  state,
+  country,
+  visits,
+  unique_visitors,
+  product_detail_views,
+  add_to_wishlist,
+  add_to_cart,
+  orders,
+  revenue_local,
+  revenue_usd,
+  bounce_rate_flag_pct,
+  bounce_rate_3cond_pct,
+  ${sql_metrics.pct("orders", "unique_visitors", 4)}                    AS conversion_pct,
+
+  -- share of the month's unique visitors (that is what the workbook
+  -- calls Contribution here - not revenue share)
+  ${sql_metrics.pct(
+    "unique_visitors",
+    "MAX(IF(city_display = 'Total', unique_visitors, NULL)) OVER (PARTITION BY month)")} AS contribution_pct,
+
+  ${sql_metrics.ratio("revenue_local", "NULLIF(orders, 0)")}            AS ticket_size_local,
+  ${sql_metrics.ratio("revenue_usd", "NULLIF(orders, 0)")}              AS ticket_size_usd,
+  ${sql_metrics.pct("add_to_cart", "product_detail_views")}             AS ac_vs_pv_pct,
+
+  -- average unique visitors per day, the sheet's AUV column
+  ${sql_metrics.ratio(
+    "unique_visitors",
+    date_utils.daysElapsed("month", "LAST_DAY(month)"))}                AS auv,
+
+  IF(city_display = 'Total', 0, 1)                                      AS row_sort
+
+FROM combined

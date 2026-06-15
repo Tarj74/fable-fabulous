@@ -1,0 +1,26 @@
+defaultProject: ai-practice-479405
+defaultLocation: US
+defaultDataset: bq_gold_apeak
+defaultAssertionDataset: bq_dataform_assertions
+dataformCoreVersion: 3.0.26
+vars:
+  raw_dataset: analytics_523093574
+  silver_dataset: bq_silver_apeak
+  gold_dataset: bq_gold_apeak
+  env: prod
+  # THE single switch for reporting weeks - every weekly model derives from it
+  # via includes/date_utils.js. MONDAY matches the client workbook rows
+  # ("4th Apr - 10th Apr"), the old weekly model and the QA windows; the old
+  # prod_working used SUNDAY, so the team must standardise on one value here.
+  # After changing it, full-refresh int_user_first_visit and the weekly marts -
+  # they store precomputed week columns.
+  week_start_day: MONDAY
+  # Incremental models reprocess this many trailing days each run.
+  # GA4 daily shards can be restated up to 72h after export, so keep >= 3.
+  lookback_days: "3"
+  # Data quality tolerances (definitions/04_quality). Consent banners make
+  # some NULL user_pseudo_ids normal; 2% of sessions here arrive without the
+  # session_engaged param, so the engagement check allows headroom.
+  quality_max_null_pseudo_id_pct: "1"
+  quality_max_missing_engagement_pct: "10"
+  quality_min_volume_vs_median_pct: "5"

@@ -1,0 +1,192 @@
+config {
+  type: "incremental",
+  name: "gold_product_performance",
+  schema: dataform.projectConfig.vars.gold_dataset,
+  description: schema_03_marts.gold_product_performance.description,
+  columns: schema_03_marts.gold_product_performance.columns,
+  partitionBy: "period_start_date",
+  clusterBy: ["product_category"],
+  tags: ["gold", "product", "daily"],
+  assertions: {
+    uniqueKey: ["period_label", "product_category"],
+    nonNull: ["period_start_date", "period_label", "product_category"],
+    rowConditions: [
+      "period_end_date >= period_start_date",
+      "orders >= 0 AND revenue_usd >= 0",
+      "unique_visitors <= visits"
+    ]
+  }
+}
+
+pre_operations {
+  -- recompute boundary = monday of the week the current reporting month
+  -- started in; covers the running month's weeks (incl. one straddling
+  -- the month edge) and the rollover where weeks become a month row
+  ${when(incremental(), `DELETE FROM ${self()}
+    WHERE period_start_date >= ${date_utils.weekStart(date_utils.monthStart(date_utils.lookbackDate()))}`)}
+}
+
+WITH
+
+-- reporting periods derived from the data itself: every closed month once,
+-- the running month as Monday-Sunday weeks
+period_spine AS (
+
+  SELECT DISTINCT
+    ${date_utils.monthStart("event_date")}                              AS period_start_date,
+    LAST_DAY(event_date, MONTH)                                         AS period_end_date,
+    FORMAT_DATE('%b-%Y', event_date)                                    AS period_label,
+    'month'                                                             AS period_type
+  FROM ${ref("stg_ga4_events")}
+  WHERE ${date_utils.monthStart("event_date")} < ${date_utils.monthStart("CURRENT_DATE()")}
+
+  UNION ALL
+
+  SELECT DISTINCT
+    ${date_utils.weekStart("event_date")},
+    ${date_utils.weekEnd("event_date")},
+    CONCAT(FORMAT_DATE('%d %b', ${date_utils.weekStart("event_date")}),
+           ' - ',
+           FORMAT_DATE('%d %b', ${date_utils.weekEnd("event_date")})),
+    'week'
+  FROM ${ref("stg_ga4_events")}
+  WHERE ${date_utils.monthStart("event_date")} = ${date_utils.monthStart("CURRENT_DATE()")}
+),
+
+active_periods AS (
+
+  SELECT * FROM period_spine
+  ${when(incremental(), `WHERE period_start_date >= ${date_utils.weekStart(date_utils.monthStart(date_utils.lookbackDate()))}`)}
+),
+
+-- one row per item per event - the only place the items array is opened
+item_events AS (
+
+  SELECT
+    e.event_date,
+    e.event_name,
+    e.user_pseudo_id,
+    ${sql_metrics.sessionKey("e.user_pseudo_id", "e.ga_session_id")}    AS session_key,
+    item.item_category                                                  AS product_category
+  FROM ${ref("stg_ga4_events")} AS e,
+       UNNEST(e.items) AS item
+  WHERE ARRAY_LENGTH(e.items) > 0
+  ${when(incremental(), `AND e.event_date >= ${date_utils.weekStart(date_utils.monthStart(date_utils.lookbackDate()))}`)}
+),
+
+-- distinct sessions that touched each category (and overall), carrying the
+-- bounce flags so the category bounce rate needs no extra event scan
+category_sessions AS (
+
+  SELECT
+    p.period_start_date,
+    p.period_label,
+    IF(GROUPING(ie.product_category) = 1,
+       'Grand Total', ie.product_category)                              AS product_category,
+    ie.session_key,
+    ie.user_pseudo_id,
+    MAX(s.is_bounced_flag)                                              AS is_bounced_flag,
+    MAX(s.is_bounced_3cond)                                             AS is_bounced_3cond
+  FROM item_events AS ie
+  JOIN active_periods AS p
+    ON ie.event_date BETWEEN p.period_start_date AND p.period_end_date
+  LEFT JOIN ${ref("int_ga4_sessions")} AS s
+    ON ie.session_key = s.session_key
+  WHERE ie.session_key IS NOT NULL
+  GROUP BY GROUPING SETS (
+    (p.period_start_date, p.period_label, ie.product_category, ie.session_key, ie.user_pseudo_id),
+    (p.period_start_date, p.period_label, ie.session_key, ie.user_pseudo_id)
+  )
+),
+
+session_rollup AS (
+
+  SELECT
+    period_start_date,
+    period_label,
+    product_category,
+    COUNT(*)                                                            AS visits,
+    COUNT(DISTINCT user_pseudo_id)                                      AS unique_visitors,
+    ${bounce_rate.bounceRatePct("is_bounced_flag", "COUNT(*)")}         AS bounce_rate_flag_pct,
+    ${bounce_rate.bounceRatePct("is_bounced_3cond", "COUNT(*)")}        AS bounce_rate_3cond_pct
+  FROM category_sessions
+  GROUP BY period_start_date, period_label, product_category
+),
+
+event_rollup AS (
+
+  SELECT
+    p.period_start_date,
+    p.period_label,
+    IF(GROUPING(ie.product_category) = 1,
+       'Grand Total', ie.product_category)                              AS product_category,
+    COUNTIF(ie.event_name = 'view_item')                                AS product_views,
+    COUNTIF(ie.event_name = 'add_to_wishlist')                          AS add_to_wishlist,
+    COUNTIF(ie.event_name = 'add_to_cart')                              AS cart_additions
+  FROM item_events AS ie
+  JOIN active_periods AS p
+    ON ie.event_date BETWEEN p.period_start_date AND p.period_end_date
+  GROUP BY GROUPING SETS (
+    (p.period_start_date, p.period_label, ie.product_category),
+    (p.period_start_date, p.period_label)
+  )
+),
+
+-- order side: a category's order count is the number of distinct
+-- transaction ids whose purchase events in the period carried the category.
+-- Event-based like every other mart, so it reconciles with GA4 and raw QA
+order_rollup AS (
+
+  SELECT
+    p.period_start_date,
+    p.period_label,
+    IF(GROUPING(item.item_category) = 1,
+       'Grand Total', item.item_category)                               AS product_category,
+    COUNT(DISTINCT IF(e.transaction_id IS NOT NULL AND e.transaction_id != '',
+                      e.transaction_id, NULL))                          AS orders,
+    ROUND(SUM(COALESCE(item.item_revenue, 0)), 2)                       AS revenue_local,
+    ROUND(SUM(COALESCE(item.item_revenue_in_usd, 0)), 2)                AS revenue_usd,
+    SUM(COALESCE(item.quantity, 0))                                     AS quantity
+  FROM ${ref("stg_ga4_events")} AS e,
+       UNNEST(e.items) AS item
+  JOIN active_periods AS p
+    ON e.event_date BETWEEN p.period_start_date AND p.period_end_date
+  WHERE e.event_name = 'purchase'
+  GROUP BY GROUPING SETS (
+    (p.period_start_date, p.period_label, item.item_category),
+    (p.period_start_date, p.period_label)
+  )
+)
+
+SELECT
+  p.period_start_date,
+  p.period_end_date,
+  p.period_label,
+  p.period_type,
+  s.product_category,
+  s.visits,
+  s.unique_visitors,
+  COALESCE(e.product_views, 0)                                          AS product_views,
+  ${sql_metrics.ratio("COALESCE(e.product_views, 0)", "s.visits")}      AS product_views_per_visit,
+  COALESCE(e.add_to_wishlist, 0)                                        AS add_to_wishlist,
+  COALESCE(e.cart_additions, 0)                                         AS cart_additions,
+  COALESCE(o.orders, 0)                                                 AS orders,
+  COALESCE(o.revenue_local, 0)                                          AS revenue_local,
+  COALESCE(o.revenue_usd, 0)                                            AS revenue_usd,
+  COALESCE(o.quantity, 0)                                               AS quantity,
+  s.bounce_rate_flag_pct,
+  s.bounce_rate_3cond_pct,
+  ${sql_metrics.pct("COALESCE(o.orders, 0)", "s.unique_visitors", 4)}   AS conversion_pct,
+  ${sql_metrics.pct("COALESCE(e.cart_additions, 0)", "e.product_views")} AS ac_vs_pv_pct,
+  ${sql_metrics.pct("COALESCE(o.orders, 0)", "e.cart_additions")}       AS order_vs_cart_pct,
+  ${sql_metrics.ratio("COALESCE(o.revenue_local, 0)", "NULLIF(o.orders, 0)")} AS ticket_size_local,
+  ${sql_metrics.ratio("COALESCE(o.revenue_usd, 0)", "NULLIF(o.orders, 0)")}   AS ticket_size_usd,
+  ${sql_metrics.ratio(
+    "s.unique_visitors",
+    date_utils.daysElapsed("p.period_start_date", "p.period_end_date"))} AS auv,
+  IF(s.product_category = 'Grand Total', 0, 1)                          AS row_sort
+
+FROM session_rollup AS s
+JOIN active_periods AS p USING (period_start_date, period_label)
+LEFT JOIN event_rollup AS e USING (period_start_date, period_label, product_category)
+LEFT JOIN order_rollup AS o USING (period_start_date, period_label, product_category)

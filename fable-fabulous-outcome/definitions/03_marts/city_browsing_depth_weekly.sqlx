@@ -1,0 +1,77 @@
+config {
+  type: "incremental",
+  name: "gold_city_browsing_depth_weekly",
+  schema: dataform.projectConfig.vars.gold_dataset,
+  description: schema_03_marts.gold_city_browsing_depth_weekly.description,
+  columns: schema_03_marts.gold_city_browsing_depth_weekly.columns,
+  partitionBy: "week_start_date",
+  clusterBy: ["city_display"],
+  tags: ["gold", "city", "weekly", "daily"],
+  assertions: {
+    uniqueKey: ["week_start_date", "city_display"],
+    nonNull: ["week_start_date", "city_display", "sessions", "users"],
+    rowConditions: [
+      "users <= sessions",
+      "pdp_intent_5_pct IS NULL OR (pdp_intent_5_pct BETWEEN 0 AND 100)",
+      "pdp_intent_10_pct IS NULL OR (pdp_intent_10_pct BETWEEN 0 AND 100)",
+      "bounce_rate_flag_pct IS NULL OR (bounce_rate_flag_pct BETWEEN 0 AND 100)"
+    ]
+  }
+}
+
+pre_operations {
+  ${when(incremental(), `DELETE FROM ${self()} WHERE week_start_date >= ${date_utils.weekStart(date_utils.lookbackDate())}`)}
+}
+
+WITH depth_rollup AS (
+
+  SELECT
+    ${date_utils.weekStart("session_date")}                             AS week_start_date,
+    IF(GROUPING(geo_city) = 1, 'Grand Total', geo_city)                 AS city,
+    IF(GROUPING(geo_region) = 1, 'Grand Total', geo_region)             AS state,
+    IF(GROUPING(geo_country) = 1, 'Grand Total', geo_country)           AS country,
+
+    COUNT(DISTINCT user_pseudo_id)                                      AS users,
+    COUNT(*)                                                            AS sessions,
+    SUM(pageviews)                                                      AS page_views,
+
+    -- the sheet's browsing-depth signal: how many sessions went at
+    -- least 5 / 10 product detail pages deep
+    COUNTIF(product_views >= 5)                                         AS sessions_5plus_pdp,
+    COUNTIF(product_views >= 10)                                        AS sessions_10plus_pdp,
+
+    SUM(cart_additions)                                                 AS cart_additions,
+    SUM(wishlist_additions)                                             AS wishlist_additions,
+
+    ${bounce_rate.bounceRatePct("is_bounced_flag", "COUNT(*)")}         AS bounce_rate_flag_pct,
+    ${bounce_rate.bounceRatePct("is_bounced_3cond", "COUNT(*)")}        AS bounce_rate_3cond_pct
+
+  FROM ${ref("int_ga4_sessions")}
+  ${when(incremental(), `WHERE session_date >= ${date_utils.weekStart(date_utils.lookbackDate())}`)}
+  GROUP BY GROUPING SETS (
+    (week_start_date, geo_city, geo_region, geo_country),
+    (week_start_date)
+  )
+)
+
+SELECT
+  week_start_date,
+  ${date_utils.weekEnd("week_start_date")}                              AS week_end_date,
+  IF(city = 'Grand Total', 'Grand Total',
+     CONCAT(city, ' (', state, ', ', country, ')'))                     AS city_display,
+  city,
+  state,
+  country,
+  users,
+  sessions,
+  page_views,
+  ${sql_metrics.ratio("sessions", "users")}                             AS sessions_per_user,
+  ${sql_metrics.ratio("page_views", "sessions")}                        AS pages_per_session,
+  ${sql_metrics.pct("sessions_5plus_pdp", "sessions")}                  AS pdp_intent_5_pct,
+  ${sql_metrics.pct("sessions_10plus_pdp", "sessions")}                 AS pdp_intent_10_pct,
+  ${sql_metrics.ratio("cart_additions", "NULLIF(wishlist_additions, 0)")} AS cart_per_wishlist,
+  bounce_rate_flag_pct,
+  bounce_rate_3cond_pct,
+  IF(city = 'Grand Total', 0, 1)                                        AS row_sort
+
+FROM depth_rollup

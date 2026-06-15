@@ -1,0 +1,8 @@
+config {
+  type: "declaration",
+  database: "ai-practice-479405",
+  schema: dataform.projectConfig.vars.raw_dataset,
+  name: "events_intraday_*",
+  description: schema_00_sources.ga4_intraday_events.description,
+  columns: schema_00_sources.ga4_intraday_events.columns
+}

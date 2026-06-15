@@ -1,0 +1,17 @@
+config {
+  type: "assertion",
+  name: "assert_transaction_id_completeness",
+  description: "transaction_id completeness (from GA4Dataform's check of the same name). One failing row per purchase event in the window whose transaction_id is NULL, empty or '(not set)' - such purchases can never be deduped or tied to an order, so the ecommerce tagging needs fixing at the source.",
+  tags: ["quality", "ga4"]
+}
+
+SELECT
+  event_date,
+  event_timestamp,
+  user_pseudo_id,
+  transaction_id,
+  revenue_usd
+FROM ${ref("stg_ga4_events")}
+WHERE event_name = 'purchase'
+  AND event_date >= ${date_utils.lookbackDate()}
+  AND (transaction_id IS NULL OR transaction_id IN ('', '(not set)'))
