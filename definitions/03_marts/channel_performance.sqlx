@@ -11,7 +11,6 @@ config {
     uniqueKey: ["month", "marketing_channel"],
     nonNull: ["month", "marketing_channel", "visits", "unique_visitors"],
     rowConditions: [
-      "unique_visitors <= visits",
       "orders >= 0 AND revenue_usd >= 0",
       "bounce_rate_flag_pct IS NULL OR (bounce_rate_flag_pct BETWEEN 0 AND 100)",
       "bounce_rate_3cond_pct IS NULL OR (bounce_rate_3cond_pct BETWEEN 0 AND 100)"

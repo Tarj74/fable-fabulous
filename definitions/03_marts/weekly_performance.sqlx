@@ -16,7 +16,7 @@ config {
       "orders_total >= 0 AND revenue_usd_total >= 0"
     ]
   }
-}
+} 
 
 pre_operations {
   -- recompute every week the trailing window touches, in full

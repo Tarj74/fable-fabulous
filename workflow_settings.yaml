@@ -1,12 +1,12 @@
 defaultProject: ai-practice-479405
 defaultLocation: US
-defaultDataset: bq_gold_apeak
-defaultAssertionDataset: bq_dataform_assertions
+defaultDataset: damas_replica_gold
+defaultAssertionDataset: damas_replica_assertions
 dataformCoreVersion: 3.0.26
 vars:
   raw_dataset: analytics_523093574
-  silver_dataset: bq_silver_apeak
-  gold_dataset: bq_gold_apeak
+  silver_dataset: damas_replica_silver
+  gold_dataset: damas_replica_gold
   env: prod
   # THE single switch for reporting weeks - every weekly model derives from it
   # via includes/date_utils.js. MONDAY matches the client workbook rows

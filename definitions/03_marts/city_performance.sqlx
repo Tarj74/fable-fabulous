@@ -19,7 +19,7 @@ config {
     ]
   }
 }
-
+  
 pre_operations {
   ${when(incremental(), `DELETE FROM ${self()} WHERE month >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
 }
