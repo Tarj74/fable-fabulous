@@ -29,9 +29,9 @@ WITH session_metrics AS (
 
   SELECT
     ${date_utils.weekStart("session_date")}                             AS week_start_date,
-    COUNTIF(session_number = 1)                                         AS visitors_new,
-    COUNTIF(session_number != 1 OR session_number IS NULL)              AS visitors_repeat,
-    COUNT(*)                                                            AS visitors_total
+    COUNTIF(session_number = 1)                                         AS visits_new,
+    COUNTIF(session_number != 1 OR session_number IS NULL)              AS visits_repeat,
+    COUNT(*)                                                            AS visits_total
   FROM ${ref("int_ga4_sessions")}
   ${when(incremental(), `WHERE session_date >= ${date_utils.weekStart(date_utils.lookbackDate())}`)}
   GROUP BY week_start_date
@@ -107,9 +107,9 @@ SELECT
   u.week_start_date,
   ${date_utils.weekEnd("u.week_start_date")}                            AS week_end_date,
 
-  COALESCE(s.visitors_new, 0)                                           AS visitors_new,
-  COALESCE(s.visitors_repeat, 0)                                        AS visitors_repeat,
-  COALESCE(s.visitors_total, 0)                                         AS visitors_total,
+  COALESCE(s.visits_new, 0)                                           AS visitors_new,
+  COALESCE(s.visits_repeat, 0)                                        AS visitors_repeat,
+  COALESCE(s.visits_total, 0)                                         AS visitors_total,
 
   u.unique_visitors_new,
   u.unique_visitors_repeat,
@@ -141,9 +141,9 @@ SELECT
 
   -- conversion barely clears 0.1% on this property, so keep 4 decimals
   -- or the rounding flattens real movement
-  ${sql_metrics.pct("u.orders_new", "u.unique_visitors_new", 4)}        AS conversion_pct_new,
-  ${sql_metrics.pct("u.orders_repeat", "u.unique_visitors_repeat", 4)}  AS conversion_pct_repeat,
-  ${sql_metrics.pct("u.orders_total", "u.unique_visitors_total", 4)}    AS conversion_pct_total
+  ${sql_metrics.pct("u.orders_new", "s.visits_new", 4)}        AS conversion_pct_new,
+  ${sql_metrics.pct("u.orders_repeat", "s.visits_repeat", 4)}  AS conversion_pct_repeat,
+  ${sql_metrics.pct("u.orders_total", "s.visits_total", 4)}    AS conversion_pct_total
 
 FROM user_event_metrics AS u
 LEFT JOIN session_metrics AS s USING (week_start_date)

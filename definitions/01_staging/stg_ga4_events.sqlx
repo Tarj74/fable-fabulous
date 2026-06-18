@@ -148,13 +148,21 @@ SELECT
       item.item_id,
       item.item_name,
       COALESCE(NULLIF(TRIM(item.item_category), ''), '(not set)')       AS item_category,
+      COALESCE(NULLIF(TRIM(item.item_category), ''), '(not set)')       AS item_category_3,
       item.quantity,
       item.item_revenue,
-      item.item_revenue_in_usd
+      item.item_revenue_in_usd,
+      item.item_list_name,
     FROM UNNEST(items) AS item
   )                                                                     AS items,
 
-  shard_type
+  shard_type,
+  ( 
+    SELECT item.item_list_name
+    FROM UNNEST(items) AS item
+    WHERE item.item_list_name IS NOT NULL
+    LIMIT 1
+  )                                                               AS item_list_name,
 
 FROM merged
 ${when(incremental(), `WHERE PARSE_DATE('%Y%m%d', event_date) >= ${date_utils.lookbackDate()}`)}

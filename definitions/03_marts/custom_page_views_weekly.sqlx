@@ -20,8 +20,14 @@ config {
 ${page_views_mart.weeklyPageMatrix({
   stgEvents: ref("stg_ga4_events"),
   sessions: ref("int_ga4_sessions"),
+
+  eventNames: ["page_view"],
+  fromClause: ``,
+  extraWhere: ``,
+
   eventWindow: ``,
+
   pageDimSql: `COALESCE(page_type, 'Others')`,
-  pageFilterSql: `TRUE`,
+
   pageColumnName: "page_name"
 })}

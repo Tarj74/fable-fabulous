@@ -20,8 +20,26 @@ config {
 ${page_views_mart.weeklyPageMatrix({
   stgEvents: ref("stg_ga4_events"),
   sessions: ref("int_ga4_sessions"),
+
+  eventNames: ["view_item_list"],
+  fromClause: ``,
+  extraWhere: `AND item_list_name IS NOT NULL`,
+
   eventWindow: `AND event_date < '2026-06-01'`,
-  pageDimSql: `COALESCE(REGEXP_EXTRACT(page_path, r'/([^/]+?)(?:\\.html)?/?$'), '/')`,
-  pageFilterSql: `page_type = 'PLP'`,
+
+  pageDimSql: `
+COALESCE(
+  NULLIF(
+    TRIM(
+      ARRAY_REVERSE(
+        SPLIT(TRIM(item_list_name), '/')
+      )[SAFE_OFFSET(0)]
+    ),
+    ''
+  ),
+  'Unknown'
+)
+`,
+
   pageColumnName: "plp_page"
 })}

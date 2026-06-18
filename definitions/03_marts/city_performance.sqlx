@@ -11,7 +11,6 @@ config {
     uniqueKey: ["month", "city_display"],
     nonNull: ["month", "city_display", "visits", "unique_visitors"],
     rowConditions: [
-      "unique_visitors <= visits",
       "orders >= 0 AND revenue_usd >= 0",
       "bounce_rate_flag_pct IS NULL OR (bounce_rate_flag_pct BETWEEN 0 AND 100)",
       "bounce_rate_3cond_pct IS NULL OR (bounce_rate_3cond_pct BETWEEN 0 AND 100)",
@@ -31,7 +30,7 @@ WITH session_metrics AS (
     IF(GROUPING(geo_city) = 1, 'Total', geo_city)                       AS city,
     IF(GROUPING(geo_region) = 1, 'Total', geo_region)                   AS state,
     IF(GROUPING(geo_country) = 1, 'Total', geo_country)                 AS country,
-    COUNT(*)                                                            AS visits,
+    -- COUNT(*)                                                            AS visits,
     ${bounce_rate.bounceRatePct("is_bounced_flag", "COUNT(*)")}         AS bounce_rate_flag_pct,
     ${bounce_rate.bounceRatePct("is_bounced_3cond", "COUNT(*)")}        AS bounce_rate_3cond_pct
   FROM ${ref("int_ga4_sessions")}
@@ -46,6 +45,8 @@ event_metrics AS (
     IF(GROUPING(geo_city) = 1, 'Total', geo_city)                       AS city,
     IF(GROUPING(geo_region) = 1, 'Total', geo_region)                   AS state,
     IF(GROUPING(geo_country) = 1, 'Total', geo_country)                 AS country,
+     COUNT(DISTINCT CONCAT(user_pseudo_id, '_',
+      CAST(ga_session_id AS STRING)))                                    AS visits,
     COUNT(DISTINCT user_pseudo_id)                                      AS unique_visitors,
     COUNTIF(event_name = 'view_item')                                   AS product_detail_views,
     COUNTIF(event_name = 'add_to_wishlist')                             AS add_to_wishlist,
@@ -71,7 +72,7 @@ combined AS (
     e.city,
     e.state,
     e.country,
-    COALESCE(s.visits, 0)                                               AS visits,
+    COALESCE(e.visits, 0)                                               AS visits,
     e.unique_visitors,
     e.product_detail_views,
     e.add_to_wishlist,
@@ -101,7 +102,7 @@ SELECT
   revenue_usd,
   bounce_rate_flag_pct,
   bounce_rate_3cond_pct,
-  ${sql_metrics.pct("orders", "unique_visitors", 4)}                    AS conversion_pct,
+  ${sql_metrics.pct("orders", "visits", 4)}                    AS conversion_pct,
 
   -- share of the month's unique visitors (that is what the workbook
   -- calls Contribution here - not revenue share)

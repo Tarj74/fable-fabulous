@@ -29,20 +29,37 @@ function weeklyPageMatrix(opts) {
 WITH pageviews AS (
 
   SELECT
-    ${dates.weekStart("event_date")}                                    AS week_start_date,
-    ${opts.pageDimSql}                                                  AS page,
+    week_start_date,
+    page,
     user_pseudo_id,
-    ${metrics.sessionKey()}                                             AS session_key,
-    ${channels.organicPaidBucket("channel_group")}                      AS channel_bucket,
+    session_key,
+    channel_bucket,
+    event_timestamp,
     ROW_NUMBER() OVER (
-      PARTITION BY ${metrics.sessionKey()}
+      PARTITION BY session_key
       ORDER BY event_timestamp DESC
-    ) = 1                                                               AS is_session_exit
-  FROM ${opts.stgEvents}
-  WHERE event_name = 'page_view'
-    AND ga_session_id IS NOT NULL
-    AND ${opts.pageFilterSql}
-    ${opts.eventWindow}
+    ) = 1 AS is_session_exit
+
+  FROM (
+
+    SELECT DISTINCT
+      ${dates.weekStart("event_date")}                                    AS week_start_date,
+      ${opts.pageDimSql}                                                  AS page,
+      user_pseudo_id,
+      ${metrics.sessionKey()}                                             AS session_key,
+      ${channels.organicPaidBucket("channel_group")}                      AS channel_bucket,
+      event_timestamp
+
+    FROM ${opts.stgEvents}
+    ${opts.fromClause || ''}
+
+    WHERE event_name IN (${(opts.eventNames || ["page_view"]).map(e => `'${e}'`).join(", ")})
+      AND ga_session_id IS NOT NULL
+      ${opts.extraWhere || ''}
+      ${opts.eventWindow}
+
+  )
+
 ),
 
 -- page view side of the matrix; GROUPING SETS adds the Grand Total row.

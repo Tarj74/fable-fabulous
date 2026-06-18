@@ -28,7 +28,7 @@ WITH session_metrics AS (
   SELECT
     ${date_utils.monthStart("session_date")}                            AS month,
     IF(GROUPING(gs.device_class) = 1, 'Total', gs.device_class)         AS device_class,
-    COUNT(*)                                                            AS sessions,
+    COUNT(*)                                                            AS traffic,
     ${bounce_rate.bounceRatePct("is_bounced_flag", "COUNT(*)")}         AS bounce_rate_flag_pct,
     ${bounce_rate.bounceRatePct("is_bounced_3cond", "COUNT(*)")}        AS bounce_rate_3cond_pct
   FROM ${ref("int_ga4_sessions")} AS gs
@@ -42,7 +42,7 @@ event_metrics AS (
     ${date_utils.monthStart("event_date")}                              AS month,
     IF(GROUPING(ge.device_class) = 1, 'Total', ge.device_class)         AS device_class,
     -- the workbook's Traffic column is distinct users, not sessions
-    COUNT(DISTINCT user_pseudo_id)                                      AS traffic,
+    -- COUNT(DISTINCT user_pseudo_id)                                      AS traffic,
     COUNTIF(event_name = 'view_item')                                   AS product_views,
     COUNTIF(event_name = 'add_to_cart')                                 AS add_to_cart,
     COUNT(DISTINCT IF(event_name = 'view_item', user_pseudo_id, NULL))  AS unique_product_viewers,
@@ -64,8 +64,8 @@ combined AS (
   SELECT
     e.month,
     e.device_class,
-    e.traffic,
-    COALESCE(s.sessions, 0)                                             AS sessions,
+    -- e.traffic,
+    COALESCE(s.traffic, 0)                                             AS traffic,
     e.product_views,
     e.add_to_cart,
     s.bounce_rate_flag_pct,
@@ -84,7 +84,6 @@ SELECT
   month,
   device_class,
   traffic,
-  sessions,
   product_views,
   add_to_cart,
   bounce_rate_flag_pct,
