@@ -223,6 +223,38 @@ const gold_city_browsing_depth_weekly = {
   }
 };
 
+const gold_funnel_user = {
+  description: "Gold layer - monthly device funnel mart at user level. Open funnel with visits, product views, cart and orders (distinct users) by device class with conversion ratios.",
+  columns: {
+    month: "First day of the month",
+    device_class: "Device classification (Mobile, Desktop, Tablet, Mobile App, Unknown)",
+    visits: "Count of distinct sessions",
+    product_views: "Count of distinct users who viewed a product",
+    cart: "Count of distinct users who added to cart",
+    orders: "Count of distinct users who made a valid purchase",
+    cart_per_pv: "Cart users / product view users × 100",
+    order_per_cart: "Order users / cart users × 100",
+    conversion: "Order users / visits × 100",
+    row_sort: "0 for Total row, 1 for device rows"
+  }
+};
+
+const gold_funnel_events = {
+  description: "Gold layer - monthly device funnel mart at event level. Open funnel with visits, product views, cart events and distinct orders by device class with conversion ratios.",
+  columns: {
+    month: "First day of the month",
+    device_class: "Device classification (Mobile, Desktop, Tablet, Mobile App, Unknown)",
+    visits: "Count of distinct sessions",
+    product_views: "Total view_item event count",
+    cart: "Total add_to_cart event count",
+    orders: "Count of distinct valid transactions",
+    cart_per_pv: "Cart events / product view events × 100",
+    order_per_cart: "Orders / cart events × 100",
+    conversion: "Orders / visits × 100",
+    row_sort: "0 for Total row, 1 for device rows"
+  }
+};
+
 module.exports = {
   gold_weekly_performance,
   gold_channel_performance,
@@ -231,5 +263,7 @@ module.exports = {
   gold_product_performance,
   gold_plp_views_weekly,
   gold_custom_page_views_weekly,
-  gold_city_browsing_depth_weekly
+  gold_city_browsing_depth_weekly,
+  gold_funnel_user,
+  gold_funnel_events
 };

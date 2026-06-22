@@ -12,7 +12,6 @@ config {
     nonNull: ["month", "device_class", "traffic"],
     rowConditions: [
       "orders >= 0 AND revenue_usd >= 0 AND quantity >= 0",
-      "unique_product_viewers <= traffic",
       "bounce_rate_flag_pct IS NULL OR (bounce_rate_flag_pct BETWEEN 0 AND 100)",
       "bounce_rate_3cond_pct IS NULL OR (bounce_rate_3cond_pct BETWEEN 0 AND 100)"
     ]
@@ -45,8 +44,8 @@ event_metrics AS (
     -- COUNT(DISTINCT user_pseudo_id)                                      AS traffic,
     COUNTIF(event_name = 'view_item')                                   AS product_views,
     COUNTIF(event_name = 'add_to_cart')                                 AS add_to_cart,
-    COUNT(DISTINCT IF(event_name = 'view_item', user_pseudo_id, NULL))  AS unique_product_viewers,
-    COUNT(DISTINCT IF(event_name = 'add_to_cart', user_pseudo_id, NULL)) AS unique_cart_users,
+    -- COUNT(DISTINCT IF(event_name = 'view_item', user_pseudo_id, NULL))  AS unique_product_viewers,
+    -- COUNT(DISTINCT IF(event_name = 'add_to_cart', user_pseudo_id, NULL)) AS unique_cart_users,
     -- orders, quantity and revenue stay event-based: distinct transaction
     -- ids and summed event figures per month/device is how GA4's reports
     -- and the QA's raw queries count, so the mart reconciles with both
@@ -56,6 +55,19 @@ event_metrics AS (
     ROUND(SUM(IF(event_name = 'purchase', COALESCE(revenue_usd, 0), 0)), 2)   AS revenue_usd
   FROM ${ref("stg_ga4_events")} AS ge
   ${when(incremental(), `WHERE event_date >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+  GROUP BY GROUPING SETS ((month, ge.device_class), (month))
+),
+
+item_metrics AS (
+  SELECT
+    ${date_utils.monthStart("ge.event_date")}                           AS month,
+    IF(GROUPING(ge.device_class) = 1, 'Total', ge.device_class)         AS device_class,
+    COUNT(DISTINCT IF(ge.event_name = 'view_item',
+      item.item_id, NULL))                                              AS unique_product_view,
+    COUNT(DISTINCT IF(ge.event_name = 'view_cart',
+      item.item_id, NULL))                                              AS unique_cart
+  FROM ${ref("stg_ga4_events")} AS ge, UNNEST(ge.items) AS item
+  ${when(incremental(), `WHERE ge.event_date >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
   GROUP BY GROUPING SETS ((month, ge.device_class), (month))
 ),
 
@@ -70,14 +82,15 @@ combined AS (
     e.add_to_cart,
     s.bounce_rate_flag_pct,
     s.bounce_rate_3cond_pct,
-    e.unique_product_viewers,
-    e.unique_cart_users,
+    i.unique_product_view,
+    i.unique_cart,
     e.orders,
     e.quantity,
     e.revenue_local,
     e.revenue_usd
   FROM event_metrics AS e
   LEFT JOIN session_metrics AS s USING (month, device_class)
+  LEFT JOIN item_metrics AS i USING (month, device_class)
 )
 
 SELECT
@@ -101,16 +114,16 @@ SELECT
     "revenue_usd",
     "MAX(IF(device_class = 'Total', revenue_usd, NULL)) OVER (PARTITION BY month)")} AS contribution_pct,
 
-  unique_product_viewers,
-  unique_cart_users,
+  unique_product_view,
+  unique_cart,
 
   ${sql_metrics.pct(
     "traffic",
     "MAX(IF(device_class = 'Total', traffic, NULL)) OVER (PARTITION BY month)")}     AS traffic_contribution_pct,
 
   -- funnel ratios are user-on-user (both sides distinct users)
-  ${sql_metrics.pct("unique_product_viewers", "traffic")}               AS product_view_per_traffic_pct,
-  ${sql_metrics.pct("unique_cart_users", "unique_product_viewers")}     AS cart_per_product_view_pct,
+  ${sql_metrics.pct("unique_product_view", "traffic")}               AS product_view_per_traffic_pct,
+  ${sql_metrics.pct("unique_cart", "unique_product_view")}     AS cart_per_product_view_pct,
 
   IF(device_class = 'Total', 0, 1)                                      AS row_sort
 
