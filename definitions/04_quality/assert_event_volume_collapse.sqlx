@@ -1,0 +1,43 @@
+config {
+  type: "assertion",
+  name: "assert_event_volume_collapse",
+  description: "Sustained tracking-outage detector: fails when the three most recent covered days each ran below vars.quality_min_volume_vs_median_pct of the trailing 28-day median event volume. Three days in a row filters out quiet weekends and zero-traffic days that are normal on small properties; a real tag or consent-banner breakage stays low until someone fixes it.",
+  tags: ["quality", "ga4"]
+}
+
+WITH daily_volume AS (
+
+  SELECT
+    event_date,
+    COUNT(*)                                                            AS events
+  FROM ${ref("stg_ga4_events")}
+  WHERE event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 31 DAY)
+  GROUP BY event_date
+),
+
+baseline AS (
+
+  -- median of the 28 days preceding the 3 under inspection
+  SELECT APPROX_QUANTILES(events, 2)[OFFSET(1)]                         AS median_events
+  FROM daily_volume
+  WHERE event_date < DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY)
+),
+
+recent AS (
+
+  SELECT event_date, events
+  FROM daily_volume
+  ORDER BY event_date DESC
+  LIMIT 3
+)
+
+SELECT
+  MIN(r.event_date)                                                     AS collapse_from,
+  MAX(r.event_date)                                                     AS collapse_to,
+  MAX(r.events)                                                         AS busiest_recent_day,
+  ANY_VALUE(b.median_events)                                            AS median_events
+FROM recent AS r
+CROSS JOIN baseline AS b
+HAVING COUNT(*) = 3
+   AND MAX(r.events) < ANY_VALUE(b.median_events)
+       * ${dataform.projectConfig.vars.quality_min_volume_vs_median_pct} / 100

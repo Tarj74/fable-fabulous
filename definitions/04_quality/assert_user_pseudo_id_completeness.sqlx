@@ -1,0 +1,15 @@
+config {
+  type: "assertion",
+  name: "assert_user_pseudo_id_completeness",
+  description: "user_pseudo_id completeness (from GA4Dataform's check of the same name). NULL ids are expected at a low rate once consent banners are involved, so this fails on the rate crossing vars.quality_max_null_pseudo_id_pct rather than on a single row - a jump means broken tagging or a consent-mode misconfiguration.",
+  tags: ["quality", "ga4"]
+}
+
+SELECT
+  COUNT(*)                                                              AS events_in_window,
+  COUNTIF(user_pseudo_id IS NULL)                                       AS null_pseudo_ids,
+  ROUND(COUNTIF(user_pseudo_id IS NULL) * 100 / COUNT(*), 2)            AS null_pct
+FROM ${ref("stg_ga4_events")}
+WHERE event_date >= ${date_utils.lookbackDate()}
+HAVING COUNTIF(user_pseudo_id IS NULL) * 100 / COUNT(*)
+       > ${dataform.projectConfig.vars.quality_max_null_pseudo_id_pct}

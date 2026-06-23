@@ -1,0 +1,72 @@
+config {
+  type: "incremental",
+  name: "int_ga4_sessions",
+  schema: dataform.projectConfig.vars.silver_dataset,
+  description: schema_02_intermediate.int_ga4_sessions.description,
+  columns: schema_02_intermediate.int_ga4_sessions.columns,
+  partitionBy: "session_date",
+  clusterBy: ["device_class", "channel_group"],
+  tags: ["silver", "ga4", "daily"],
+  assertions: {
+    uniqueKey: ["session_key"],
+    nonNull: ["session_key", "user_pseudo_id", "session_date"],
+    rowConditions: [
+      "duration_seconds >= 0",
+      "events > 0",
+      "pageviews <= events"
+    ]
+  }
+}
+
+pre_operations {
+  ${when(incremental(), `DELETE FROM ${self()} WHERE session_date >= ${date_utils.lookbackDate()}`)}
+}
+
+SELECT
+  ${sql_metrics.sessionKey()}                                           AS session_key,
+  user_pseudo_id,
+  ga_session_id,
+  -- session_number = 1 marks the user's first ever session; this is what
+  -- splits new vs repeat visits in the weekly report
+  MAX(ga_session_number)                                                AS session_number,
+  MIN(event_date)                                                       AS session_date,
+  MIN(event_timestamp)                                                  AS session_start,
+  MAX(event_timestamp)                                                  AS session_end,
+  TIMESTAMP_DIFF(MAX(event_timestamp), MIN(event_timestamp), SECOND)    AS duration_seconds,
+
+  -- bounce, both house methods - see includes/bounce_rate.js
+  ${bounce_rate.bouncedByFlag("session_engaged")}                       AS is_bounced_flag,
+  ${bounce_rate.bouncedByConditions("event_timestamp", "event_name")}   AS is_bounced_3cond,
+
+  -- per-session activity counters; marts aggregate these instead of
+  -- rescanning the event table
+  COUNT(*)                                                              AS events,
+  COUNTIF(event_name = 'page_view')                                     AS pageviews,
+  COUNTIF(event_name = 'view_item')                                     AS product_views,
+  COUNTIF(event_name = 'add_to_cart')                                   AS cart_additions,
+  COUNTIF(event_name = 'add_to_wishlist')                               AS wishlist_additions,
+  COUNTIF(event_name = 'purchase')                                      AS purchase_events,
+  SUM(COALESCE(engagement_time_msec, 0))                                AS engagement_time_msec,
+
+  -- session scoped dimensions. MAX() skips the NULLs that early events
+  -- (session_start, first_visit) often carry, and the NULLIF folds make a
+  -- known value always beat the Unknown/Unassigned placeholder when a
+  -- session carries both - otherwise 'Unknown' wins on alphabet alone
+  MAX(device_category)                                                  AS device_category,
+  COALESCE(MAX(NULLIF(device_class, 'Unknown')), 'Unknown')             AS device_class,
+  COALESCE(MAX(NULLIF(channel_group, 'Unassigned')), 'Unassigned')      AS channel_group,
+  MAX(manual_source)                                                    AS manual_source,
+  MAX(manual_medium)                                                    AS manual_medium,
+  COALESCE(MAX(NULLIF(geo_city, 'Unknown')), 'Unknown')                 AS geo_city,
+  COALESCE(MAX(NULLIF(geo_region, 'Unknown')), 'Unknown')               AS geo_region,
+  COALESCE(MAX(NULLIF(geo_country, 'Unknown')), 'Unknown')              AS geo_country
+
+FROM ${ref("stg_ga4_events")}
+WHERE ga_session_id IS NOT NULL
+-- scan one day wider than the delete window so a session straddling the
+-- window edge still aggregates from its true first event ...
+${when(incremental(), `AND event_date >= DATE_SUB(${date_utils.lookbackDate()}, INTERVAL 1 DAY)`)}
+GROUP BY session_key, user_pseudo_id, ga_session_id
+-- ... and only (re)insert sessions that started inside the window; the
+-- straddler keeps the complete row written by an earlier run
+${when(incremental(), `HAVING MIN(event_date) >= ${date_utils.lookbackDate()}`)}

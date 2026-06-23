@@ -1,0 +1,25 @@
+config {
+  type: "assertion",
+  name: "assert_session_engagement_coverage",
+  description: "Guards the input of the 'flag' bounce method: sessions where no event carried the session_engaged param at all count as bounces by definition, so if their share crosses vars.quality_max_missing_engagement_pct the published bounce rate is inflated by missing data, not user behaviour. Around 2% of sessions lack the param on a healthy property.",
+  tags: ["quality", "ga4"]
+}
+
+WITH session_param_coverage AS (
+
+  SELECT
+    ${sql_metrics.sessionKey()}                                         AS session_key,
+    COUNTIF(session_engaged IS NOT NULL) > 0                            AS has_engagement_param
+  FROM ${ref("stg_ga4_events")}
+  WHERE ga_session_id IS NOT NULL
+    AND event_date >= ${date_utils.lookbackDate()}
+  GROUP BY session_key
+)
+
+SELECT
+  COUNT(*)                                                              AS sessions_in_window,
+  COUNTIF(NOT has_engagement_param)                                     AS sessions_missing_param,
+  ROUND(COUNTIF(NOT has_engagement_param) * 100 / COUNT(*), 2)          AS missing_pct
+FROM session_param_coverage
+HAVING COUNTIF(NOT has_engagement_param) * 100 / COUNT(*)
+       > ${dataform.projectConfig.vars.quality_max_missing_engagement_pct}

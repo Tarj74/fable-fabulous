@@ -1,0 +1,168 @@
+config {
+  type: "incremental",
+  name: "stg_ga4_events",
+  schema: dataform.projectConfig.vars.silver_dataset,
+  description: schema_01_staging.stg_ga4_events.description,
+  columns: schema_01_staging.stg_ga4_events.columns,
+  partitionBy: "event_date",
+  clusterBy: ["event_name", "user_pseudo_id"],
+  tags: ["silver", "ga4", "daily"]
+}
+
+pre_operations {
+  -- replace the trailing window wholesale instead of MERGE on a unique key:
+  -- GA4 batches several events into the same microsecond, so no usable event
+  -- level key exists (12% of rows here collide on user+name+timestamp+bundle)
+  ${when(incremental(), `DELETE FROM ${self()} WHERE event_date >= ${date_utils.lookbackDate()}`)}
+}
+
+-- read the raw shards once, projecting only the structs we actually use:
+-- BigQuery bills per column scanned, so user_properties, privacy_info,
+-- user_ltv and friends never enter the pipeline
+WITH daily_raw AS (
+
+  SELECT
+    -- _TABLE_SUFFIX loses the leading '2' to the events_2* prefix,
+    -- glue it back before comparing against YYYYMMDD strings
+    CONCAT('2', _TABLE_SUFFIX)         AS shard_date,
+    event_date,
+    event_timestamp,
+    event_name,
+    user_pseudo_id,
+    event_params,
+    device,
+    geo,
+    session_traffic_source_last_click,
+    ecommerce,
+    items,
+    platform
+  FROM ${ref("events_2*")}
+  ${when(incremental(), `WHERE CONCAT('2', _TABLE_SUFFIX) >= ${date_utils.lookbackSuffix()}`)}
+),
+
+intraday_raw AS (
+
+  SELECT
+    _TABLE_SUFFIX                      AS shard_date,
+    event_date,
+    event_timestamp,
+    event_name,
+    user_pseudo_id,
+    event_params,
+    device,
+    geo,
+    session_traffic_source_last_click,
+    ecommerce,
+    items,
+    platform
+  FROM ${ref("events_intraday_*")}
+  ${when(incremental(), `WHERE _TABLE_SUFFIX >= ${date_utils.lookbackSuffix()}`)}
+
+  -- streaming export can replay an event; daily shards never do.
+  -- batch_* columns are what make a GA4 row physically unique
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY user_pseudo_id, event_name, event_timestamp,
+                 event_bundle_sequence_id, batch_event_index,
+                 batch_page_id, batch_ordering_id
+    ORDER BY event_timestamp
+  ) = 1
+),
+
+-- intraday rows are only trusted for dates whose daily shard has not
+-- landed yet. Yesterday usually sits in this bucket until its daily
+-- export shows up around midday, and a skipped export stays covered.
+merged AS (
+
+  SELECT *, 'daily' AS shard_type
+  FROM daily_raw
+
+  UNION ALL
+
+  SELECT *, 'intraday' AS shard_type
+  FROM intraday_raw
+  WHERE shard_date NOT IN (SELECT shard_date FROM daily_raw)
+)
+
+SELECT
+  -- event core
+  PARSE_DATE('%Y%m%d', event_date)                                      AS event_date,
+  TIMESTAMP_MICROS(event_timestamp)                                     AS event_timestamp,
+  event_name,
+
+  -- user / session
+  user_pseudo_id,
+  ${ga4_params.epInt("ga_session_id")},
+  ${ga4_params.epInt("ga_session_number")},
+  -- typed inconsistently at the source (string '1' and int 1 both occur),
+  -- read every variant or engagement is undercounted
+  ${ga4_params.epAny("session_engaged")},
+  ${ga4_params.epInt("engagement_time_msec")},
+
+  -- page
+  ${ga4_params.epString("page_location")},
+  COALESCE(
+    REGEXP_EXTRACT(
+      (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'),
+      r'^https?://[^/]+(/[^?#]*)'),
+    '/')                                                                AS page_path,
+  ${ga4_params.epString("page_title")},
+  -- tagging sends mixed case ('cart' vs 'Cart'), normalise once here
+  CASE LOWER((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_type'))
+    WHEN 'pdp' THEN 'PDP'
+    WHEN 'plp' THEN 'PLP'
+    ELSE INITCAP((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_type'))
+  END                                                                   AS page_type,
+
+  -- device, with the app stream split the device report needs
+  device.category                                                       AS device_category,
+  CASE
+    WHEN platform IN ('ANDROID', 'IOS') THEN 'Mobile App'
+    WHEN device.category IS NULL        THEN 'Unknown'
+    ELSE INITCAP(device.category)
+  END                                                                   AS device_class,
+  platform,
+  device.web_info.hostname                                              AS hostname,
+
+  -- geo, blanks and GA4's literal '(not set)' folded into 'Unknown' so the
+  -- city grains stay dense and unresolved traffic lands in one bucket
+  COALESCE(NULLIF(NULLIF(TRIM(geo.city), ''), '(not set)'), 'Unknown')    AS geo_city,
+  COALESCE(NULLIF(NULLIF(TRIM(geo.region), ''), '(not set)'), 'Unknown')  AS geo_region,
+  COALESCE(NULLIF(NULLIF(TRIM(geo.country), ''), '(not set)'), 'Unknown') AS geo_country,
+
+  -- traffic attribution (session scoped last click)
+  COALESCE(
+    session_traffic_source_last_click.cross_channel_campaign.primary_channel_group,
+    'Unassigned')                                                       AS channel_group,
+  session_traffic_source_last_click.manual_campaign.source              AS manual_source,
+  session_traffic_source_last_click.manual_campaign.medium              AS manual_medium,
+
+  -- ecommerce order header
+  ecommerce.transaction_id                                              AS transaction_id,
+  ecommerce.purchase_revenue                                            AS revenue_local,
+  ecommerce.purchase_revenue_in_usd                                     AS revenue_usd,
+  ecommerce.total_item_quantity                                         AS item_quantity,
+
+  -- line items, trimmed to what the product mart reads
+  ARRAY(
+    SELECT AS STRUCT
+      item.item_id,
+      item.item_name,
+      COALESCE(NULLIF(TRIM(item.item_category), ''), '(not set)')       AS item_category,
+      COALESCE(NULLIF(TRIM(item.item_category), ''), '(not set)')       AS item_category_3,
+      item.quantity,
+      item.item_revenue,
+      item.item_revenue_in_usd,
+      item.item_list_name,
+    FROM UNNEST(items) AS item
+  )                                                                     AS items,
+
+  shard_type,
+  ( 
+    SELECT item.item_list_name
+    FROM UNNEST(items) AS item
+    WHERE item.item_list_name IS NOT NULL
+    LIMIT 1
+  )                                                               AS item_list_name,
+
+FROM merged
+${when(incremental(), `WHERE PARSE_DATE('%Y%m%d', event_date) >= ${date_utils.lookbackDate()}`)}

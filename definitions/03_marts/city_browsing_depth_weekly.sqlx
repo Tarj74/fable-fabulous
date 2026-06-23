@@ -1,0 +1,107 @@
+config {
+  type: "incremental",
+  name: "gold_city_browsing_depth_weekly",
+  schema: dataform.projectConfig.vars.gold_dataset,
+  description: schema_03_marts.gold_city_browsing_depth_weekly.description,
+  columns: schema_03_marts.gold_city_browsing_depth_weekly.columns,
+  partitionBy: "week_start_date",
+  clusterBy: ["city"],
+  tags: ["gold", "city", "weekly", "daily"],
+  assertions: {
+    uniqueKey: ["week_start_date", "city"],
+    nonNull: ["week_start_date", "city", "sessions", "users"],
+    rowConditions: [
+      "users <= sessions",
+      "pdp_intent_5_pct IS NULL OR (pdp_intent_5_pct BETWEEN 0 AND 100)",
+      "pdp_intent_10_pct IS NULL OR (pdp_intent_10_pct BETWEEN 0 AND 100)",
+      "bounce_rate_flag_pct IS NULL OR (bounce_rate_flag_pct BETWEEN 0 AND 100)"
+    ]
+  }
+}
+
+pre_operations {
+  ${when(incremental(), `DELETE FROM ${self()} WHERE week_start_date >= ${date_utils.weekStart(date_utils.lookbackDate())}`)}
+}
+
+WITH distinct_pdp_per_session AS (
+
+  SELECT
+    ${sql_metrics.sessionKey()} AS session_key,
+    COUNT(DISTINCT item.item_id) AS distinct_product_views
+
+  FROM ${ref("stg_ga4_events")},
+       UNNEST(items) AS item
+  WHERE event_name = 'view_item'
+  GROUP BY 1
+),
+
+depth_rollup AS (
+
+  SELECT
+    ${date_utils.weekStart("session_date")}                             AS week_start_date,
+    IF(GROUPING(s.geo_city) = 1, 'Grand Total', NULLIF(NULLIF(TRIM(s.geo_city), ''), 'Unknown'))                AS city_raw,
+    IF(GROUPING(geo_region) = 1, 'Grand Total', NULLIF(NULLIF(TRIM(s.geo_region), ''), 'Unknown'))             AS state_raw,
+    IF(GROUPING(geo_country) = 1, 'Grand Total', NULLIF(NULLIF(TRIM(s.geo_country), ''), 'Unknown'))           AS country_raw,
+
+    COUNT(DISTINCT s.user_pseudo_id)                                      AS users,
+    COUNT(*)                                                            AS sessions,
+    SUM(s.pageviews)                                                      AS page_views,
+
+    -- the sheet's browsing-depth signal: how many sessions went at
+    -- least 5 / 10 product detail pages deep
+    COUNTIF(COALESCE(pdp.distinct_product_views, 0) >= 5)                                         AS sessions_5plus_pdp,
+    COUNTIF(COALESCE(pdp.distinct_product_views, 0) >= 10)                                        AS sessions_10plus_pdp,
+
+    SUM(s.cart_additions)                                                 AS cart_additions,
+    SUM(s.wishlist_additions)                                             AS wishlist_additions,
+
+    ${bounce_rate.bounceRatePct("s.is_bounced_flag", "COUNT(*)")}         AS bounce_rate_flag_pct,
+    ${bounce_rate.bounceRatePct("s.is_bounced_3cond", "COUNT(*)")}        AS bounce_rate_3cond_pct
+
+  FROM ${ref("int_ga4_sessions")} as s
+  LEFT JOIN distinct_pdp_per_session AS pdp
+    ON pdp.session_key = s.session_key
+  ${when(incremental(), `WHERE s.session_date >= ${date_utils.weekStart(date_utils.lookbackDate())}`)}
+  
+  -- Group by the original source columns
+  GROUP BY GROUPING SETS (
+    (week_start_date, s.geo_city, s.geo_region, s.geo_country),
+    (week_start_date)
+  )
+)
+
+SELECT
+  week_start_date,
+  ${date_utils.weekEnd("week_start_date")}                              AS week_end_date,
+  CASE
+    WHEN city_raw = 'Grand Total' THEN 'Grand Total'
+    WHEN city_raw IS NULL          THEN '(not set)'
+    ELSE CONCAT(city_raw, ' (', COALESCE(state_raw, '(not set)'),
+                ', ', COALESCE(country_raw, '(not set)'), ')')
+  END AS city,
+  users,
+  sessions,
+  page_views,
+  ${sql_metrics.ratio("sessions", "users")}                             AS sessions_per_user,
+  ${sql_metrics.ratio("page_views", "sessions")}                        AS pages_per_session,
+  ${sql_metrics.pct("sessions_5plus_pdp", "sessions")}                  AS pdp_intent_5_pct,
+  ${sql_metrics.pct("sessions_10plus_pdp", "sessions")}                 AS pdp_intent_10_pct,
+  ${sql_metrics.ratio("cart_additions", "NULLIF(wishlist_additions, 0)")} AS cart_per_wishlist,
+  bounce_rate_flag_pct,
+  bounce_rate_3cond_pct,
+  ROUND(
+    SAFE_DIVIDE(
+      sessions - LAG(sessions, 1) OVER (
+        PARTITION BY city_raw, state_raw, country_raw 
+        ORDER BY week_start_date
+      ),
+      LAG(sessions, 1) OVER (
+        PARTITION BY city_raw, state_raw, country_raw 
+        ORDER BY week_start_date
+      )
+    ) * 100, 
+    2
+  ) AS session_increase_previous,
+  IF(city_raw = 'Grand Total', 0, 1) AS row_sort
+
+FROM depth_rollup

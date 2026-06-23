@@ -1,0 +1,40 @@
+config {
+  type: "assertion",
+  name: "assert_staging_reconciles_raw",
+  description: "Row-count reconciliation between the raw daily shards and stg_ga4_events over the incremental window. One failing row per drifting date. Catches both silent drops (the old MERGE lost 12% of events this way) and double-loads (a date holding daily AND intraday rows at once).",
+  tags: ["quality", "ga4"]
+}
+
+WITH raw_counts AS (
+
+  SELECT
+    PARSE_DATE('%Y%m%d', event_date)                                    AS event_date,
+    COUNT(*)                                                            AS raw_rows
+  FROM ${ref("events_2*")}
+  WHERE CONCAT('2', _TABLE_SUFFIX) >= ${date_utils.lookbackSuffix()}
+    AND PARSE_DATE('%Y%m%d', event_date) >= ${date_utils.lookbackDate()}
+  GROUP BY event_date
+),
+
+stg_counts AS (
+
+  SELECT
+    event_date,
+    COUNT(*)                                                            AS stg_rows,
+    COUNT(DISTINCT shard_type)                                          AS shard_types
+  FROM ${ref("stg_ga4_events")}
+  WHERE event_date >= ${date_utils.lookbackDate()}
+  GROUP BY event_date
+)
+
+SELECT
+  event_date,
+  r.raw_rows,
+  s.stg_rows,
+  s.shard_types
+FROM raw_counts AS r
+JOIN stg_counts AS s USING (event_date)
+-- dates covered by a daily shard must match it exactly and must not also
+-- carry intraday leftovers
+WHERE r.raw_rows != s.stg_rows
+   OR s.shard_types > 1

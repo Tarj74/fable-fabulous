@@ -1,0 +1,133 @@
+config {
+  type: "incremental",
+  name: "gold_channel_performance",
+  schema: dataform.projectConfig.vars.gold_dataset,
+  description: schema_03_marts.gold_channel_performance.description,
+  columns: schema_03_marts.gold_channel_performance.columns,
+  partitionBy: "month",
+  clusterBy: ["marketing_channel"],
+  tags: ["gold", "channel", "monthly", "daily"],
+  assertions: {
+    uniqueKey: ["month", "marketing_channel"],
+    nonNull: ["month", "marketing_channel", "visits", "unique_visitors"],
+    rowConditions: [
+      "orders >= 0 AND revenue_usd >= 0",
+      "bounce_rate_flag_pct IS NULL OR (bounce_rate_flag_pct BETWEEN 0 AND 100)",
+      "bounce_rate_3cond_pct IS NULL OR (bounce_rate_3cond_pct BETWEEN 0 AND 100)"
+    ]
+  }
+}
+
+pre_operations {
+  ${when(incremental(), `DELETE FROM ${self()} WHERE month >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+}
+
+-- GROUPING SETS gives the per-channel rows and the month Total row from a
+-- single scan of each input - no UNION ALL re-reads
+WITH session_metrics AS (
+
+  SELECT
+    ${date_utils.monthStart("session_date")}                            AS month,
+    IF(GROUPING(channel_group) = 1, 'Total', channel_group)             AS marketing_channel,
+    COUNT(*)                                                            AS visits,
+    ROUND(AVG(duration_seconds), 2)                                     AS avg_time_on_site_secs,
+    ${bounce_rate.bounceRatePct("is_bounced_flag", "COUNT(*)")}         AS bounce_rate_flag_pct,
+    ${bounce_rate.bounceRatePct("is_bounced_3cond", "COUNT(*)")}        AS bounce_rate_3cond_pct
+  FROM ${ref("int_ga4_sessions")}
+  ${when(incremental(), `WHERE session_date >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+  GROUP BY GROUPING SETS ((month, channel_group), (month))
+),
+
+event_metrics AS (
+
+  SELECT
+    ${date_utils.monthStart("event_date")}                              AS month,
+    IF(GROUPING(channel_group) = 1, 'Total', channel_group)             AS marketing_channel,
+    COUNT(DISTINCT user_pseudo_id)                                      AS unique_visitors,
+    COUNTIF(event_name = 'view_item')                                   AS product_views,
+    COUNTIF(event_name = 'add_to_cart')                                 AS cart_additions,
+    COUNT(DISTINCT IF(event_name = 'view_item', user_pseudo_id, NULL))  AS unique_product_viewers,
+    COUNT(DISTINCT IF(event_name = 'add_to_cart', user_pseudo_id, NULL)) AS unique_cart_users,
+    -- orders and revenue stay event-based: distinct transaction ids and
+    -- summed event revenue per month/channel is how GA4's reports and the
+    -- QA's raw queries count, so the mart reconciles with both
+    ${sql_metrics.distinctOrders("event_name", "transaction_id")}       AS orders,
+    ROUND(SUM(IF(event_name = 'purchase', COALESCE(revenue_local, 0), 0)), 2) AS revenue_local,
+    ROUND(SUM(IF(event_name = 'purchase', COALESCE(revenue_usd, 0), 0)), 2)   AS revenue_usd
+  FROM ${ref("stg_ga4_events")}
+  ${when(incremental(), `WHERE event_date >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+  GROUP BY GROUPING SETS ((month, channel_group), (month))
+),
+
+item_metrics AS (
+
+  SELECT
+    ${date_utils.monthStart("e.event_date")}                                AS month,
+    IF(GROUPING(e.channel_group) = 1, 'Total', e.channel_group)             AS marketing_channel,
+    COUNT(DISTINCT IF(e.event_name = 'view_item', item.item_id, NULL))      AS unique_product_view,
+    COUNT(DISTINCT IF(e.event_name = 'view_cart', item.item_id, NULL))      AS unique_cart
+  FROM ${ref("stg_ga4_events")} AS e, UNNEST(e.items) AS item
+  ${when(incremental(), `WHERE e.event_date >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+  GROUP BY GROUPING SETS ((month, e.channel_group), (month))
+),
+
+combined AS (
+
+  SELECT
+    e.month,
+    e.marketing_channel,
+    COALESCE(s.visits, 0)                                               AS visits,
+    e.unique_visitors,
+    s.avg_time_on_site_secs,
+    s.bounce_rate_flag_pct,
+    s.bounce_rate_3cond_pct,
+    e.product_views,
+    e.cart_additions,
+    e.unique_product_viewers,
+    e.unique_cart_users,
+    e.orders,
+    e.revenue_local,
+    e.revenue_usd,
+    i.unique_product_view,
+    i.unique_cart
+  FROM event_metrics AS e
+  LEFT JOIN session_metrics AS s USING (month, marketing_channel)
+  LEFT JOIN item_metrics AS i USING (month, marketing_channel)
+)
+
+SELECT
+  month,
+  marketing_channel,
+  visits,
+  unique_visitors,
+  avg_time_on_site_secs,
+  bounce_rate_flag_pct,
+  bounce_rate_3cond_pct,
+  product_views,
+  cart_additions,
+  orders,
+  revenue_local,
+  revenue_usd,
+  ${sql_metrics.pct("orders", "visits", 4)}                    AS conversion_pct,
+  unique_product_viewers,
+  unique_cart_users,
+  unique_product_view,
+  unique_cart,
+
+  -- shares divide by the sum of the channel rows (not the Total row's
+  -- distinct counts) so contributions always add up to 100% even when a
+  -- user or an order id shows up in more than one channel
+  ${sql_metrics.pct(
+    "unique_visitors",
+    "SUM(IF(marketing_channel = 'Total', 0, unique_visitors)) OVER (PARTITION BY month)")} AS traffic_contribution_pct,
+  ${sql_metrics.pct(
+    "orders",
+    "SUM(IF(marketing_channel = 'Total', 0, orders)) OVER (PARTITION BY month)")}          AS order_contribution_pct,
+
+  ${sql_metrics.ratio("revenue_local", "NULLIF(orders, 0)")}            AS ticket_size_local,
+  ${sql_metrics.ratio("revenue_usd", "NULLIF(orders, 0)")}              AS ticket_size_usd,
+
+  -- keeps the Total row pinned on top when the sheet sorts by this
+  IF(marketing_channel = 'Total', 0, 1)                                 AS row_sort
+
+FROM combined

@@ -1,0 +1,149 @@
+config {
+  type: "incremental",
+  name: "gold_weekly_performance",
+  schema: dataform.projectConfig.vars.gold_dataset,
+  description: schema_03_marts.gold_weekly_performance.description,
+  columns: schema_03_marts.gold_weekly_performance.columns,
+  partitionBy: "week_start_date",
+  tags: ["gold", "weekly", "daily"],
+  assertions: {
+    uniqueKey: ["week_start_date"],
+    nonNull: ["week_start_date", "week_end_date", "visitors_total", "unique_visitors_total"],
+    rowConditions: [
+      "DATE_DIFF(week_end_date, week_start_date, DAY) = 6",
+      "visitors_new + visitors_repeat = visitors_total",
+      "unique_visitors_new + unique_visitors_repeat = unique_visitors_total",
+      "orders_total >= 0 AND revenue_usd_total >= 0"
+    ]
+  }
+} 
+
+pre_operations {
+  -- recompute every week the trailing window touches, in full
+  ${when(incremental(), `DELETE FROM ${self()} WHERE week_start_date >= ${date_utils.weekStart(date_utils.lookbackDate())}`)}
+}
+
+-- sessions side: 'Visitors' in the sheet. New = the user's first ever
+-- session, anything later (or unknown) = repeat
+WITH session_metrics AS (
+
+  SELECT
+    ${date_utils.weekStart("session_date")}                             AS week_start_date,
+    COUNTIF(session_number = 1)                                         AS visits_new,
+    COUNTIF(session_number != 1 OR session_number IS NULL)              AS visits_repeat,
+    COUNT(*)                                                            AS visits_total
+  FROM ${ref("int_ga4_sessions")}
+  ${when(incremental(), `WHERE session_date >= ${date_utils.weekStart(date_utils.lookbackDate())}`)}
+  GROUP BY week_start_date
+),
+
+-- users, event funnel AND orders side: 'Unique Visitors', the event counts
+-- and the order/revenue figures, all from one pass over staged events.
+-- A user is new for the whole week their first_visit falls into
+events_typed AS (
+
+  SELECT
+    ${date_utils.weekStart("e.event_date")}                             AS week_start_date,
+    e.user_pseudo_id,
+    e.event_name,
+    e.transaction_id,
+    e.revenue_local,
+    e.revenue_usd,
+    IF(${date_utils.weekStart("e.event_date")} = f.first_visit_week,
+       'new', 'repeat')                                                 AS user_type
+  FROM ${ref("stg_ga4_events")} AS e
+  LEFT JOIN ${ref("int_user_first_visit")} AS f
+    USING (user_pseudo_id)
+  ${when(incremental(), `WHERE e.event_date >= ${date_utils.weekStart(date_utils.lookbackDate())}`)}
+),
+
+user_event_metrics AS (
+
+  SELECT
+    week_start_date,
+
+    COUNT(DISTINCT IF(user_type = 'new', user_pseudo_id, NULL))         AS unique_visitors_new,
+    COUNT(DISTINCT IF(user_type = 'repeat', user_pseudo_id, NULL))      AS unique_visitors_repeat,
+    COUNT(DISTINCT user_pseudo_id)                                      AS unique_visitors_total,
+
+    COUNTIF(event_name = 'view_item' AND user_type = 'new')             AS product_views_new,
+    COUNTIF(event_name = 'view_item' AND user_type = 'repeat')          AS product_views_repeat,
+    COUNTIF(event_name = 'view_item')                                   AS product_views_total,
+
+    COUNTIF(event_name = 'add_to_wishlist' AND user_type = 'new')       AS add_to_wishlist_new,
+    COUNTIF(event_name = 'add_to_wishlist' AND user_type = 'repeat')    AS add_to_wishlist_repeat,
+    COUNTIF(event_name = 'add_to_wishlist')                             AS add_to_wishlist_total,
+
+    COUNTIF(event_name = 'add_to_cart' AND user_type = 'new')           AS add_to_cart_new,
+    COUNTIF(event_name = 'add_to_cart' AND user_type = 'repeat')        AS add_to_cart_repeat,
+    COUNTIF(event_name = 'add_to_cart')                                 AS add_to_cart_total,
+
+    -- orders and revenue stay event-based on purpose: distinct transaction
+    -- ids and summed event revenue per week is how GA4's own reports and the
+    -- QA's raw queries count, so the mart reconciles with both
+    ${sql_metrics.distinctOrders("event_name", "transaction_id", "user_type = 'new'")}    AS orders_new,
+    ${sql_metrics.distinctOrders("event_name", "transaction_id", "user_type = 'repeat'")} AS orders_repeat,
+    ${sql_metrics.distinctOrders("event_name", "transaction_id")}                         AS orders_total,
+
+    ROUND(SUM(IF(event_name = 'purchase' AND user_type = 'new',
+        COALESCE(revenue_local, 0), 0)), 2)                             AS revenue_local_new,
+    ROUND(SUM(IF(event_name = 'purchase' AND user_type = 'repeat',
+        COALESCE(revenue_local, 0), 0)), 2)                             AS revenue_local_repeat,
+    ROUND(SUM(IF(event_name = 'purchase',
+        COALESCE(revenue_local, 0), 0)), 2)                             AS revenue_local_total,
+
+    ROUND(SUM(IF(event_name = 'purchase' AND user_type = 'new',
+        COALESCE(revenue_usd, 0), 0)), 2)                               AS revenue_usd_new,
+    ROUND(SUM(IF(event_name = 'purchase' AND user_type = 'repeat',
+        COALESCE(revenue_usd, 0), 0)), 2)                               AS revenue_usd_repeat,
+    ROUND(SUM(IF(event_name = 'purchase',
+        COALESCE(revenue_usd, 0), 0)), 2)                               AS revenue_usd_total
+
+  FROM events_typed
+  GROUP BY week_start_date
+)
+
+SELECT
+  u.week_start_date,
+  ${date_utils.weekEnd("u.week_start_date")}                            AS week_end_date,
+
+  COALESCE(s.visits_new, 0)                                           AS visitors_new,
+  COALESCE(s.visits_repeat, 0)                                        AS visitors_repeat,
+  COALESCE(s.visits_total, 0)                                         AS visitors_total,
+
+  u.unique_visitors_new,
+  u.unique_visitors_repeat,
+  u.unique_visitors_total,
+
+  u.product_views_new,
+  u.product_views_repeat,
+  u.product_views_total,
+
+  u.add_to_wishlist_new,
+  u.add_to_wishlist_repeat,
+  u.add_to_wishlist_total,
+
+  u.add_to_cart_new,
+  u.add_to_cart_repeat,
+  u.add_to_cart_total,
+
+  u.orders_new,
+  u.orders_repeat,
+  u.orders_total,
+
+  u.revenue_local_new,
+  u.revenue_local_repeat,
+  u.revenue_local_total,
+
+  u.revenue_usd_new,
+  u.revenue_usd_repeat,
+  u.revenue_usd_total,
+
+  -- conversion barely clears 0.1% on this property, so keep 4 decimals
+  -- or the rounding flattens real movement
+  ${sql_metrics.pct("u.orders_new", "s.visits_new", 4)}        AS conversion_pct_new,
+  ${sql_metrics.pct("u.orders_repeat", "s.visits_repeat", 4)}  AS conversion_pct_repeat,
+  ${sql_metrics.pct("u.orders_total", "s.visits_total", 4)}    AS conversion_pct_total
+
+FROM user_event_metrics AS u
+LEFT JOIN session_metrics AS s USING (week_start_date)

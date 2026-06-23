@@ -1,0 +1,92 @@
+config {
+  type: "incremental",
+  name: "gold_funnel_user",
+  schema: dataform.projectConfig.vars.gold_dataset,
+  description: schema_03_marts.gold_funnel_user.description,
+  columns: schema_03_marts.gold_funnel_user.columns,
+  partitionBy: "month",
+  clusterBy: ["device_class"],
+  tags: ["gold", "device", "funnel", "monthly", "daily"],
+  assertions: {
+    uniqueKey: ["month", "device_class"],
+    nonNull: ["month", "device_class", "visits"],
+    rowConditions: [
+      "visits >= 0",
+      "product_views >= 0",
+      "cart >= 0",
+      "orders >= 0",
+      "cart_per_prod_view IS NULL OR cart_per_prod_view >= 0",
+      "order_per_cart IS NULL OR order_per_cart >= 0",
+      "conversion IS NULL OR conversion >= 0"
+    ]
+  }
+}
+
+pre_operations {
+  ${when(incremental(), `DELETE FROM ${self()} WHERE month >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+}
+
+-- SESSION METRICS — visits from int_ga4_sessions
+WITH session_metrics AS (
+
+  SELECT
+    ${date_utils.monthStart("session_date")}                            AS month,
+    IF(GROUPING(gs.device_class) = 1, 'Total', gs.device_class)         AS device_class,
+    COUNT(DISTINCT session_key)                                         AS visits
+  FROM ${ref("int_ga4_sessions")} AS gs
+  ${when(incremental(), `WHERE session_date >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+  GROUP BY GROUPING SETS ((month, gs.device_class), (month))
+),
+
+-- EVENT METRICS — funnel steps from stg_ga4_events
+-- open funnel — each step counted independently per user
+event_metrics AS (
+
+  SELECT
+    ${date_utils.monthStart("event_date")}                              AS month,
+    IF(GROUPING(ge.device_class) = 1, 'Total', ge.device_class)         AS device_class,
+
+    -- funnel steps — COUNT DISTINCT user_pseudo_id per step
+    COUNT(DISTINCT IF(event_name = 'view_item',
+      user_pseudo_id, NULL))                                            AS product_views,
+    COUNT(DISTINCT IF(event_name = 'add_to_cart',
+      user_pseudo_id, NULL))                                            AS cart,
+    COUNT(DISTINCT IF(event_name = 'purchase',
+      user_pseudo_id, NULL))                                            AS orders
+
+  FROM ${ref("stg_ga4_events")} AS ge
+  ${when(incremental(), `WHERE event_date >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+  GROUP BY GROUPING SETS ((month, ge.device_class), (month))
+),
+
+-- COMBINED
+combined AS (
+
+  SELECT
+    e.month,
+    e.device_class,
+    COALESCE(s.visits, 0)                                               AS visits,
+    e.product_views,
+    e.cart,
+    e.orders
+  FROM event_metrics AS e
+  LEFT JOIN session_metrics AS s
+    USING (month, device_class)
+)
+
+SELECT
+  month,
+  device_class,
+  visits,
+  product_views,
+  cart,
+  orders,
+
+  -- funnel ratios
+  ${sql_metrics.pct("cart", "product_views", 2)}                        AS cart_per_prod_view,
+  ${sql_metrics.pct("orders", "cart", 2)}                               AS order_per_cart,
+  ${sql_metrics.pct("orders", "visits", 4)}                             AS conversion,
+
+  IF(device_class = 'Total', 0, 1)                                      AS row_sort
+
+FROM combined

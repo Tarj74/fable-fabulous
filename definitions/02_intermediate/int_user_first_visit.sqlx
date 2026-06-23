@@ -1,0 +1,23 @@
+config {
+  type: "incremental",
+  name: "int_user_first_visit",
+  schema: dataform.projectConfig.vars.silver_dataset,
+  description: schema_02_intermediate.int_user_first_visit.description,
+  columns: schema_02_intermediate.int_user_first_visit.columns,
+  uniqueKey: ["user_pseudo_id"],
+  tags: ["silver", "ga4", "daily"],
+  assertions: {
+    uniqueKey: ["user_pseudo_id"]
+  }
+}
+
+SELECT
+  user_pseudo_id,
+  MIN(event_date)                                                       AS first_visit_date,
+  -- precomputed because three marts group by it
+  ${date_utils.weekStart("MIN(event_date)")}                            AS first_visit_week
+FROM ${ref("stg_ga4_events")}
+WHERE event_name = 'first_visit'
+  AND user_pseudo_id IS NOT NULL
+  ${when(incremental(), `AND event_date >= ${date_utils.lookbackDate()}`)}
+GROUP BY user_pseudo_id
