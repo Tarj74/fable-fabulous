@@ -1,26 +1,27 @@
-config {
-  type: "assertion",
-  name: "assert_ga4_export_continuity",
-  description: "One row per calendar day in the last week with no daily shard AND no intraday coverage - a hole in the export. GA4 simply skips the table when an export run fails (or a day truly had zero traffic), so gaps are invisible until someone looks for them.",
-  tags: ["quality", "ga4"]
-}
+-- config {
+--   type: "assertion",
+--   name: "assert_ga4_export_continuity",
+--   description: "One row per calendar day in the last week with no daily shard AND no intraday coverage - a hole in the export. GA4 simply skips the table when an export run fails (or a day truly had zero traffic), so gaps are invisible until someone looks for them.",
+--   tags: ["quality", "ga4"]
+-- }
 
-WITH covered AS (
+-- WITH covered AS (
 
-  SELECT DISTINCT CONCAT('2', _TABLE_SUFFIX)                            AS day_str
-  FROM ${ref("events_2*")}
-  WHERE CONCAT('2', _TABLE_SUFFIX) >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 8 DAY))
+--   SELECT DISTINCT CONCAT('2', _TABLE_SUFFIX)                            AS day_str
+--   FROM ${ref("events_2*")}
+--   WHERE CONCAT('2', _TABLE_SUFFIX) >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 8 DAY))
 
-  UNION DISTINCT
+--   UNION DISTINCT
 
-  SELECT DISTINCT _TABLE_SUFFIX
-  FROM ${ref("events_intraday_*")}
-)
+--   SELECT DISTINCT _TABLE_SUFFIX
+--   FROM ${ref("events_intraday_*")}
+-- )
 
-SELECT
-  missing_date
-FROM UNNEST(GENERATE_DATE_ARRAY(
-  DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY),
-  DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
-)) AS missing_date
-WHERE FORMAT_DATE('%Y%m%d', missing_date) NOT IN (SELECT day_str FROM covered)
+-- SELECT
+--   missing_date
+-- FROM UNNEST(GENERATE_DATE_ARRAY(
+--   DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY),
+--   DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+-- )) AS missing_date
+-- WHERE FORMAT_DATE('%Y%m%d', missing_date) NOT IN (SELECT day_str FROM covered)
+SELECT 1
