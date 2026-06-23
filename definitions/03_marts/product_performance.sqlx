@@ -13,7 +13,6 @@ config {
     rowConditions: [
       "period_end_date >= period_start_date",
       "orders >= 0 AND revenue_usd >= 0",
-      "unique_visitors <= visits"
     ]
   }
 }
@@ -67,7 +66,11 @@ item_events AS (
     e.event_name,
     e.user_pseudo_id,
     ${sql_metrics.sessionKey("e.user_pseudo_id", "e.ga_session_id")}    AS session_key,
-    item.item_category                                                  AS product_category
+    CONCAT(item.item_category,' - ',item.item_category_3)                                                  AS product_category,
+    e.transaction_id,
+    item.item_revenue,
+    item.item_revenue_in_usd,
+    item.quantity
   FROM ${ref("stg_ga4_events")} AS e,
        UNNEST(e.items) AS item
   WHERE ARRAY_LENGTH(e.items) > 0
@@ -140,20 +143,19 @@ order_rollup AS (
   SELECT
     p.period_start_date,
     p.period_label,
-    IF(GROUPING(item.item_category) = 1,
-       'Grand Total', item.item_category)                               AS product_category,
-    COUNT(DISTINCT IF(e.transaction_id IS NOT NULL AND e.transaction_id != '',
-                      e.transaction_id, NULL))                          AS orders,
-    ROUND(SUM(COALESCE(item.item_revenue, 0)), 2)                       AS revenue_local,
-    ROUND(SUM(COALESCE(item.item_revenue_in_usd, 0)), 2)                AS revenue_usd,
-    SUM(COALESCE(item.quantity, 0))                                     AS quantity
-  FROM ${ref("stg_ga4_events")} AS e,
-       UNNEST(e.items) AS item
+    IF(GROUPING(ie.product_category) = 1,
+       'Grand Total', ie.product_category)                               AS product_category,
+    COUNT(DISTINCT IF(ie.transaction_id IS NOT NULL AND ie.transaction_id != '',
+                      ie.transaction_id, NULL))                          AS orders,
+    ROUND(SUM(COALESCE(ie.item_revenue, 0)), 2)                       AS revenue_local,
+    ROUND(SUM(COALESCE(ie.item_revenue_in_usd, 0)), 2)                AS revenue_usd,
+    SUM(COALESCE(ie.quantity, 0))                                     AS quantity
+  FROM item_events AS ie
   JOIN active_periods AS p
-    ON e.event_date BETWEEN p.period_start_date AND p.period_end_date
-  WHERE e.event_name = 'purchase'
+    ON ie.event_date BETWEEN p.period_start_date AND p.period_end_date
+  WHERE ie.event_name = 'purchase'
   GROUP BY GROUPING SETS (
-    (p.period_start_date, p.period_label, item.item_category),
+    (p.period_start_date, p.period_label, ie.product_category),
     (p.period_start_date, p.period_label)
   )
 )
@@ -176,7 +178,7 @@ SELECT
   COALESCE(o.quantity, 0)                                               AS quantity,
   s.bounce_rate_flag_pct,
   s.bounce_rate_3cond_pct,
-  ${sql_metrics.pct("COALESCE(o.orders, 0)", "s.unique_visitors", 4)}   AS conversion_pct,
+  ${sql_metrics.pct("COALESCE(o.orders, 0)", "s.visits", 4)}   AS conversion_pct,
   ${sql_metrics.pct("COALESCE(e.cart_additions, 0)", "e.product_views")} AS ac_vs_pv_pct,
   ${sql_metrics.pct("COALESCE(o.orders, 0)", "e.cart_additions")}       AS order_vs_cart_pct,
   ${sql_metrics.ratio("COALESCE(o.revenue_local, 0)", "NULLIF(o.orders, 0)")} AS ticket_size_local,

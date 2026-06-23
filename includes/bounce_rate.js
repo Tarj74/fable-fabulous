@@ -7,13 +7,14 @@
  * function and every mart updates on the next compile - no SQL edits.
  *
  * Method "flag"  : GA4's own session_engaged param. A session is a
- *                  bounce when no event in it carried session_engaged = '1'.
+ * bounce when no event in it carried session_engaged = '1'.
  * Method "3cond" : computed engagement, mirrors GA4's definition of an
- *                  engaged session. A session is a bounce when ALL of
- *                  these fail:
- *                    - lasted >= 10 seconds
- *                    - had >= 2 page_views
- *                    - had >= 1 purchase
+ * engaged session. A session is a bounce when ALL of
+ * these fail:
+ * - lasted >= 10 seconds
+ * - had >= 2 page_views
+ * - had >= 1 purchase
+ * - had >= 1 custom conversion event (e.g., lead conversion)
  *
  * Usage pattern: the flags are aggregate expressions evaluated while
  * grouping events to one row per session (int_ga4_sessions). Marts then
@@ -31,11 +32,21 @@ function bouncedByFlag(sessionEngagedCol) {
 
 // Session-level bounce flag, "3cond" method.
 // Expects event timestamp + event name columns, aggregates over the session.
-function bouncedByConditions(eventTimestampCol, eventNameCol) {
+// Accepts an optional array of custom event names to include as engagement criteria.
+function bouncedByConditions(eventTimestampCol, eventNameCol, customEvents = []) {
+  // Format array ['a', 'b'] into SQL syntax: 'a', 'b'
+  const formattedEvents = customEvents.map(e => `'${e}'`).join(', ');
+  
+  // Dynamically build the IN clause if custom events are provided
+  const customEventsSQL = customEvents.length > 0 
+    ? `OR COUNTIF(${eventNameCol} IN (${formattedEvents})) > 0`
+    : '';
+
   return `CASE
     WHEN TIMESTAMP_DIFF(MAX(${eventTimestampCol}), MIN(${eventTimestampCol}), SECOND) >= 10
       OR COUNTIF(${eventNameCol} = 'page_view') >= 2
       OR COUNTIF(${eventNameCol} = 'purchase') > 0
+      ${customEventsSQL}
     THEN 0
     ELSE 1
   END`;

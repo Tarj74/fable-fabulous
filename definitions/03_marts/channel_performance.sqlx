@@ -59,6 +59,18 @@ event_metrics AS (
   GROUP BY GROUPING SETS ((month, channel_group), (month))
 ),
 
+item_metrics AS (
+
+  SELECT
+    ${date_utils.monthStart("e.event_date")}                                AS month,
+    IF(GROUPING(e.channel_group) = 1, 'Total', e.channel_group)             AS marketing_channel,
+    COUNT(DISTINCT IF(e.event_name = 'view_item', item.item_id, NULL))      AS unique_product_view,
+    COUNT(DISTINCT IF(e.event_name = 'view_cart', item.item_id, NULL))      AS unique_cart
+  FROM ${ref("stg_ga4_events")} AS e, UNNEST(e.items) AS item
+  ${when(incremental(), `WHERE e.event_date >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
+  GROUP BY GROUPING SETS ((month, e.channel_group), (month))
+),
+
 combined AS (
 
   SELECT
@@ -75,9 +87,12 @@ combined AS (
     e.unique_cart_users,
     e.orders,
     e.revenue_local,
-    e.revenue_usd
+    e.revenue_usd,
+    i.unique_product_view,
+    i.unique_cart
   FROM event_metrics AS e
   LEFT JOIN session_metrics AS s USING (month, marketing_channel)
+  LEFT JOIN item_metrics AS i USING (month, marketing_channel)
 )
 
 SELECT
@@ -93,9 +108,11 @@ SELECT
   orders,
   revenue_local,
   revenue_usd,
-  ${sql_metrics.pct("orders", "unique_visitors", 4)}                    AS conversion_pct,
+  ${sql_metrics.pct("orders", "visits", 4)}                    AS conversion_pct,
   unique_product_viewers,
   unique_cart_users,
+  unique_product_view,
+  unique_cart,
 
   -- shares divide by the sum of the channel rows (not the Total row's
   -- distinct counts) so contributions always add up to 100% even when a
