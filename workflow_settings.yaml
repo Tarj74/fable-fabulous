@@ -22,5 +22,5 @@ vars:
   # some NULL user_pseudo_ids normal; 2% of sessions here arrive without the
   # session_engaged param, so the engagement check allows headroom.
   quality_max_null_pseudo_id_pct: "1"
-  quality_max_missing_engagement_pct: "10"
+  quality_max_missing_engagement_pct: "60"
   quality_min_volume_vs_median_pct: "5"

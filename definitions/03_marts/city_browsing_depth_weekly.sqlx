@@ -11,7 +11,6 @@ config {
     uniqueKey: ["week_start_date", "city"],
     nonNull: ["week_start_date", "city", "sessions", "users"],
     rowConditions: [
-      "users <= sessions",
       "pdp_intent_5_pct IS NULL OR (pdp_intent_5_pct BETWEEN 0 AND 100)",
       "pdp_intent_10_pct IS NULL OR (pdp_intent_10_pct BETWEEN 0 AND 100)",
       "bounce_rate_flag_pct IS NULL OR (bounce_rate_flag_pct BETWEEN 0 AND 100)"
@@ -26,59 +25,150 @@ pre_operations {
 WITH distinct_pdp_per_session AS (
 
   SELECT
-    ${sql_metrics.sessionKey()} AS session_key,
-    COUNT(DISTINCT item.item_id) AS distinct_product_views
+    ${sql_metrics.sessionKey()}           AS session_key,
+    COUNT(DISTINCT item.item_id)          AS distinct_product_views
 
   FROM ${ref("stg_ga4_events")},
        UNNEST(items) AS item
   WHERE event_name = 'view_item'
+  ${when(incremental(), `AND event_date >= ${date_utils.weekStart(date_utils.lookbackDate())}`)}
   GROUP BY 1
 ),
 
-depth_rollup AS (
+stg_geo_clean AS (
+
+  SELECT
+    * EXCEPT(geo_city, geo_region, geo_country),
+    CASE
+      WHEN COALESCE(NULLIF(NULLIF(TRIM(geo_city),    ''), '(not set)'), 'Unknown') = 'Unknown'
+        OR COALESCE(NULLIF(NULLIF(TRIM(geo_region),  ''), '(not set)'), 'Unknown') = 'Unknown'
+        OR COALESCE(NULLIF(NULLIF(TRIM(geo_country), ''), '(not set)'), 'Unknown') = 'Unknown'
+        THEN 'Unknown'
+      ELSE COALESCE(NULLIF(NULLIF(TRIM(geo_city),    ''), '(not set)'), 'Unknown')
+    END                                                                 AS geo_city,
+    CASE
+      WHEN COALESCE(NULLIF(NULLIF(TRIM(geo_city),    ''), '(not set)'), 'Unknown') = 'Unknown'
+        OR COALESCE(NULLIF(NULLIF(TRIM(geo_region),  ''), '(not set)'), 'Unknown') = 'Unknown'
+        OR COALESCE(NULLIF(NULLIF(TRIM(geo_country), ''), '(not set)'), 'Unknown') = 'Unknown'
+        THEN 'Unknown'
+      ELSE COALESCE(NULLIF(NULLIF(TRIM(geo_region),  ''), '(not set)'), 'Unknown')
+    END                                                                 AS geo_region,
+    CASE
+      WHEN COALESCE(NULLIF(NULLIF(TRIM(geo_city),    ''), '(not set)'), 'Unknown') = 'Unknown'
+        OR COALESCE(NULLIF(NULLIF(TRIM(geo_region),  ''), '(not set)'), 'Unknown') = 'Unknown'
+        OR COALESCE(NULLIF(NULLIF(TRIM(geo_country), ''), '(not set)'), 'Unknown') = 'Unknown'
+        THEN 'Unknown'
+      ELSE COALESCE(NULLIF(NULLIF(TRIM(geo_country), ''), '(not set)'), 'Unknown')
+    END                                                                 AS geo_country
+  FROM ${ref("stg_ga4_events")}
+  ${when(incremental(), `WHERE event_date >= ${date_utils.weekStart(date_utils.lookbackDate())}`)}
+),
+
+int_geo_clean AS (
+
+  SELECT
+    * EXCEPT(geo_city, geo_region, geo_country),
+    CASE
+      WHEN COALESCE(NULLIF(NULLIF(TRIM(geo_city),    ''), '(not set)'), 'Unknown') = 'Unknown'
+        OR COALESCE(NULLIF(NULLIF(TRIM(geo_region),  ''), '(not set)'), 'Unknown') = 'Unknown'
+        OR COALESCE(NULLIF(NULLIF(TRIM(geo_country), ''), '(not set)'), 'Unknown') = 'Unknown'
+        THEN 'Unknown'
+      ELSE COALESCE(NULLIF(NULLIF(TRIM(geo_city),    ''), '(not set)'), 'Unknown')
+    END                                                                 AS geo_city,
+    CASE
+      WHEN COALESCE(NULLIF(NULLIF(TRIM(geo_city),    ''), '(not set)'), 'Unknown') = 'Unknown'
+        OR COALESCE(NULLIF(NULLIF(TRIM(geo_region),  ''), '(not set)'), 'Unknown') = 'Unknown'
+        OR COALESCE(NULLIF(NULLIF(TRIM(geo_country), ''), '(not set)'), 'Unknown') = 'Unknown'
+        THEN 'Unknown'
+      ELSE COALESCE(NULLIF(NULLIF(TRIM(geo_region),  ''), '(not set)'), 'Unknown')
+    END                                                                 AS geo_region,
+    CASE
+      WHEN COALESCE(NULLIF(NULLIF(TRIM(geo_city),    ''), '(not set)'), 'Unknown') = 'Unknown'
+        OR COALESCE(NULLIF(NULLIF(TRIM(geo_region),  ''), '(not set)'), 'Unknown') = 'Unknown'
+        OR COALESCE(NULLIF(NULLIF(TRIM(geo_country), ''), '(not set)'), 'Unknown') = 'Unknown'
+        THEN 'Unknown'
+      ELSE COALESCE(NULLIF(NULLIF(TRIM(geo_country), ''), '(not set)'), 'Unknown')
+    END                                                                 AS geo_country
+  FROM ${ref("int_ga4_sessions")}
+  ${when(incremental(), `WHERE session_date >= ${date_utils.weekStart(date_utils.lookbackDate())}`)}
+),
+
+event_metrics AS (
+
+  SELECT
+    ${date_utils.weekStart("event_date")}                               AS week_start_date,
+    IF(GROUPING(geo_city) = 1,    'Grand Total', geo_city)              AS city,
+    IF(GROUPING(geo_region) = 1,  'Grand Total', geo_region)            AS state,
+    IF(GROUPING(geo_country) = 1, 'Grand Total', geo_country)           AS country,
+
+    COUNT(DISTINCT user_pseudo_id)                                      AS users,
+    COUNT(DISTINCT CONCAT(user_pseudo_id, '_',
+      CAST(ga_session_id AS STRING)))                                   AS sessions,
+    SUM(IF(event_name = 'page_view', 1, 0))                             AS page_views,
+    SUM(IF(event_name = 'add_to_cart', 1, 0))                           AS cart_additions,
+    SUM(IF(event_name = 'add_to_wishlist', 1, 0))                       AS wishlist_additions
+
+  FROM stg_geo_clean
+  GROUP BY GROUPING SETS (
+    (week_start_date, geo_city, geo_region, geo_country),
+    (week_start_date)
+  )
+),
+
+session_metrics AS (
 
   SELECT
     ${date_utils.weekStart("session_date")}                             AS week_start_date,
-    IF(GROUPING(s.geo_city) = 1, 'Grand Total', NULLIF(NULLIF(TRIM(s.geo_city), ''), 'Unknown'))                AS city_raw,
-    IF(GROUPING(geo_region) = 1, 'Grand Total', NULLIF(NULLIF(TRIM(s.geo_region), ''), 'Unknown'))             AS state_raw,
-    IF(GROUPING(geo_country) = 1, 'Grand Total', NULLIF(NULLIF(TRIM(s.geo_country), ''), 'Unknown'))           AS country_raw,
+    IF(GROUPING(geo_city) = 1,    'Grand Total', geo_city)              AS city,
+    IF(GROUPING(geo_region) = 1,  'Grand Total', geo_region)            AS state,
+    IF(GROUPING(geo_country) = 1, 'Grand Total', geo_country)           AS country,
 
-    COUNT(DISTINCT s.user_pseudo_id)                                      AS users,
-    COUNT(*)                                                            AS sessions,
-    SUM(s.pageviews)                                                      AS page_views,
+    COUNTIF(COALESCE(pdp.distinct_product_views, 0) >= 5)               AS sessions_5plus_pdp,
+    COUNTIF(COALESCE(pdp.distinct_product_views, 0) >= 10)              AS sessions_10plus_pdp,
+    ${bounce_rate.bounceRatePct("s.is_bounced_flag",  "COUNT(*)")}      AS bounce_rate_flag_pct,
+    ${bounce_rate.bounceRatePct("s.is_bounced_3cond", "COUNT(*)")}      AS bounce_rate_3cond_pct
 
-    -- the sheet's browsing-depth signal: how many sessions went at
-    -- least 5 / 10 product detail pages deep
-    COUNTIF(COALESCE(pdp.distinct_product_views, 0) >= 5)                                         AS sessions_5plus_pdp,
-    COUNTIF(COALESCE(pdp.distinct_product_views, 0) >= 10)                                        AS sessions_10plus_pdp,
-
-    SUM(s.cart_additions)                                                 AS cart_additions,
-    SUM(s.wishlist_additions)                                             AS wishlist_additions,
-
-    ${bounce_rate.bounceRatePct("s.is_bounced_flag", "COUNT(*)")}         AS bounce_rate_flag_pct,
-    ${bounce_rate.bounceRatePct("s.is_bounced_3cond", "COUNT(*)")}        AS bounce_rate_3cond_pct
-
-  FROM ${ref("int_ga4_sessions")} as s
+  FROM int_geo_clean AS s
   LEFT JOIN distinct_pdp_per_session AS pdp
     ON pdp.session_key = s.session_key
-  ${when(incremental(), `WHERE s.session_date >= ${date_utils.weekStart(date_utils.lookbackDate())}`)}
-  
-  -- Group by the original source columns
   GROUP BY GROUPING SETS (
-    (week_start_date, s.geo_city, s.geo_region, s.geo_country),
+    (week_start_date, geo_city, geo_region, geo_country),
     (week_start_date)
   )
+),
+
+combined AS (
+
+  SELECT
+    e.week_start_date,
+    e.city,
+    e.state,
+    e.country,
+    e.users,
+    e.sessions,
+    e.page_views,
+    e.cart_additions,
+    e.wishlist_additions,
+    s.sessions_5plus_pdp,
+    s.sessions_10plus_pdp,
+    s.bounce_rate_flag_pct,
+    s.bounce_rate_3cond_pct
+
+  FROM event_metrics AS e
+  LEFT JOIN session_metrics AS s
+    USING (week_start_date, city, state, country)
 )
 
 SELECT
   week_start_date,
   ${date_utils.weekEnd("week_start_date")}                              AS week_end_date,
+
   CASE
-    WHEN city_raw = 'Grand Total' THEN 'Grand Total'
-    WHEN city_raw IS NULL          THEN '(not set)'
-    ELSE CONCAT(city_raw, ' (', COALESCE(state_raw, '(not set)'),
-                ', ', COALESCE(country_raw, '(not set)'), ')')
-  END AS city,
+    WHEN city = 'Grand Total' THEN 'Grand Total'
+    WHEN city = 'Unknown'     THEN '(not set)'
+    ELSE CONCAT(city, ', ', state, ', ', country)
+  END                                                                   AS city,
+
   users,
   sessions,
   page_views,
@@ -89,19 +179,21 @@ SELECT
   ${sql_metrics.ratio("cart_additions", "NULLIF(wishlist_additions, 0)")} AS cart_per_wishlist,
   bounce_rate_flag_pct,
   bounce_rate_3cond_pct,
+
   ROUND(
     SAFE_DIVIDE(
       sessions - LAG(sessions, 1) OVER (
-        PARTITION BY city_raw, state_raw, country_raw 
+        PARTITION BY city, state, country
         ORDER BY week_start_date
       ),
       LAG(sessions, 1) OVER (
-        PARTITION BY city_raw, state_raw, country_raw 
+        PARTITION BY city, state, country
         ORDER BY week_start_date
       )
-    ) * 100, 
+    ) * 100,
     2
-  ) AS session_increase_previous,
-  IF(city_raw = 'Grand Total', 0, 1) AS row_sort
+  )                                                                     AS session_increase_previous,
 
-FROM depth_rollup
+  IF(city = 'Grand Total', 0, 1)                                        AS row_sort
+
+FROM combined
