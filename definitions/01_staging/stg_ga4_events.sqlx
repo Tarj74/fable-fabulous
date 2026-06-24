@@ -148,7 +148,7 @@ SELECT
       item.item_id,
       item.item_name,
       COALESCE(NULLIF(TRIM(item.item_category), ''), '(not set)')       AS item_category,
-      COALESCE(NULLIF(TRIM(item.item_category), ''), '(not set)')       AS item_category_3,
+      COALESCE(NULLIF(TRIM(item.item_category3), ''), '(not set)')       AS item_category_3,
       item.quantity,
       item.item_revenue,
       item.item_revenue_in_usd,
