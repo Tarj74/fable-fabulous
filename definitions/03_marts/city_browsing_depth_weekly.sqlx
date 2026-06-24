@@ -182,18 +182,27 @@ SELECT
 
   ROUND(
     SAFE_DIVIDE(
-      sessions - LAG(sessions, 1) OVER (
-        PARTITION BY city, state, country
-        ORDER BY week_start_date
+      sessions - IF(
+        DATE_DIFF(
+          week_start_date,
+          LAG(week_start_date, 1) OVER (PARTITION BY city, state, country ORDER BY week_start_date),
+          DAY
+        ) = 7,
+        LAG(sessions, 1) OVER (PARTITION BY city, state, country ORDER BY week_start_date),
+        0
       ),
-      LAG(sessions, 1) OVER (
-        PARTITION BY city, state, country
-        ORDER BY week_start_date
+      IF(
+        DATE_DIFF(
+          week_start_date,
+          LAG(week_start_date, 1) OVER (PARTITION BY city, state, country ORDER BY week_start_date),
+          DAY
+        ) = 7,
+        LAG(sessions, 1) OVER (PARTITION BY city, state, country ORDER BY week_start_date),
+        0
       )
     ) * 100,
     2
   )                                                                     AS session_increase_previous,
-
   IF(city = 'Grand Total', 0, 1)                                        AS row_sort
 
 FROM combined
