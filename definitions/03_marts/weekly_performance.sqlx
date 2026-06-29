@@ -107,9 +107,9 @@ SELECT
   u.week_start_date,
   ${date_utils.weekEnd("u.week_start_date")}                            AS week_end_date,
 
-  COALESCE(s.visits_new, 0)                                           AS visitors_new,
-  COALESCE(s.visits_repeat, 0)                                        AS visitors_repeat,
-  COALESCE(s.visits_total, 0)                                         AS visitors_total,
+  COALESCE(s.visits_new, 0)                                           AS visits_new,
+  COALESCE(s.visits_repeat, 0)                                        AS visits_repeat,
+  COALESCE(s.visits_total, 0)                                         AS visits_total,
 
   u.unique_visitors_new,
   u.unique_visitors_repeat,
@@ -147,3 +147,5 @@ SELECT
 
 FROM user_event_metrics AS u
 LEFT JOIN session_metrics AS s USING (week_start_date)
+
+

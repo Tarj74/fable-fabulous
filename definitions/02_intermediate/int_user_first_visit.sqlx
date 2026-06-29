@@ -13,11 +13,23 @@ config {
 
 SELECT
   user_pseudo_id,
-  MIN(event_date)                                                       AS first_visit_date,
-  -- precomputed because three marts group by it
-  ${date_utils.weekStart("MIN(event_date)")}                            AS first_visit_week
+  MIN(
+    COALESCE(
+      IF(event_name = 'first_visit', event_date, NULL),
+      IF(ga_session_number = 1, event_date, NULL)
+    )
+  )                                                                     AS first_visit_date,
+  ${date_utils.weekStart(`MIN(
+    COALESCE(
+      IF(event_name = 'first_visit', event_date, NULL),
+      IF(ga_session_number = 1, event_date, NULL)
+    )
+  )`)}                                                                  AS first_visit_week
 FROM ${ref("stg_ga4_events")}
-WHERE event_name = 'first_visit'
-  AND user_pseudo_id IS NOT NULL
+WHERE user_pseudo_id IS NOT NULL
+  AND (
+    event_name = 'first_visit'
+    OR ga_session_number = 1
+  )
   ${when(incremental(), `AND event_date >= ${date_utils.lookbackDate()}`)}
 GROUP BY user_pseudo_id
