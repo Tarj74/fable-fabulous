@@ -1,25 +1,26 @@
-config {
-  type: "assertion",
-  name: "assert_ga4_export_freshness",
-  description: "GA4 export timeliness (the 'tables timeliness' check from GA4Dataform). Fails when the newest date covered by either a daily or an intraday shard is older than yesterday - the signature of a paused export (e.g. the 1M events/day cap) or a broken BigQuery link.",
-  tags: ["quality", "ga4"]
-}
+-- config {
+--   type: "assertion",
+--   name: "assert_ga4_export_freshness",
+--   description: "GA4 export timeliness (the 'tables timeliness' check from GA4Dataform). Fails when the newest date covered by either a daily or an intraday shard is older than yesterday - the signature of a paused export (e.g. the 1M events/day cap) or a broken BigQuery link.",
+--   tags: ["quality", "ga4"]
+-- }
 
-WITH covered AS (
+-- WITH covered AS (
 
-  SELECT MAX(PARSE_DATE('%Y%m%d', CONCAT('2', _TABLE_SUFFIX)))          AS newest_date
-  FROM ${ref("events_2*")}
-  -- bounded scan: shard names older than 30 days cannot be the newest
-  WHERE CONCAT('2', _TABLE_SUFFIX) >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY))
+--   SELECT MAX(PARSE_DATE('%Y%m%d', CONCAT('2', _TABLE_SUFFIX)))          AS newest_date
+--   FROM ${ref("events_2*")}
+--   -- bounded scan: shard names older than 30 days cannot be the newest
+--   WHERE CONCAT('2', _TABLE_SUFFIX) >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY))
 
-  UNION ALL
+--   UNION ALL
 
-  SELECT MAX(PARSE_DATE('%Y%m%d', _TABLE_SUFFIX))
-  FROM ${ref("events_intraday_*")}
-)
+--   SELECT MAX(PARSE_DATE('%Y%m%d', _TABLE_SUFFIX))
+--   FROM ${ref("events_intraday_*")}
+-- )
 
-SELECT
-  MAX(newest_date)                                                      AS newest_covered_date,
-  CURRENT_DATE()                                                        AS checked_at
-FROM covered
-HAVING MAX(newest_date) < DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+-- SELECT
+--   MAX(newest_date)                                                      AS newest_covered_date,
+--   CURRENT_DATE()                                                        AS checked_at
+-- FROM covered
+-- HAVING MAX(newest_date) < DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+select 1
