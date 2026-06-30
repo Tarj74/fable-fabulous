@@ -64,7 +64,7 @@ item_metrics AS (
     IF(GROUPING(ge.device_class) = 1, 'Total', ge.device_class)         AS device_class,
     COUNT(DISTINCT IF(ge.event_name = 'view_item',
       item.item_id, NULL))                                              AS unique_product_view,
-    COUNT(DISTINCT IF(ge.event_name = 'view_cart',
+    COUNT(DISTINCT IF(ge.event_name = 'add_to_cart',
       item.item_id, NULL))                                              AS unique_cart
   FROM ${ref("stg_ga4_events")} AS ge, UNNEST(ge.items) AS item
   ${when(incremental(), `WHERE ge.event_date >= ${date_utils.monthStart(date_utils.lookbackDate())}`)}
