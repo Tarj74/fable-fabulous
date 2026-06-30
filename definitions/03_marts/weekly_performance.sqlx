@@ -8,10 +8,10 @@ config {
   tags: ["gold", "weekly", "daily"],
   assertions: {
     uniqueKey: ["week_start_date"],
-    nonNull: ["week_start_date", "week_end_date", "visitors_total", "unique_visitors_total"],
+    nonNull: ["week_start_date", "week_end_date", "visits_total", "unique_visitors_total"],
     rowConditions: [
       "DATE_DIFF(week_end_date, week_start_date, DAY) = 6",
-      "visitors_new + visitors_repeat = visitors_total",
+      "visits_new + visits_repeat = visits_total",
       "unique_visitors_new + unique_visitors_repeat = unique_visitors_total",
       "orders_total >= 0 AND revenue_usd_total >= 0"
     ]
