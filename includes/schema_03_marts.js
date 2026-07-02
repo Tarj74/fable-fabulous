@@ -255,6 +255,18 @@ const gold_funnel_events = {
   }
 };
 
+const gold_events_hourly = {
+  description:
+    "Gold layer - definitions/03_marts/hourly_data/events_hourly.sqlx. Realtime/near-realtime event volume, incrementally refreshed with the last 6 hours appended per run (full refresh scans the trailing 1 day). One row per event_date/event_name/event_timestamp grain. event_count is a raw row count off stg_ga4_events with no dedup by user or session - built for freshness/anomaly monitoring against the GA4 realtime UI, not for reconciliation with the daily/weekly/monthly gold marts above. The freshness assertion checks event_timestamp against the same 6-hour window the incremental load uses, so a stale load gets caught within the run cadence instead of up to a day later.",
+  columns: {
+    event_date: "Date of the event (partition column)",
+    event_name: "GA4 event name (cluster column)",
+    event_timestamp: "Event timestamp; also the column the freshness assertion checks against the 6-hour incremental window",
+    event_count: "Raw count of events for this event_date/event_name/event_timestamp grain, no dedup applied"
+  }
+};
+
+
 module.exports = {
   gold_weekly_performance,
   gold_channel_performance,
@@ -265,5 +277,6 @@ module.exports = {
   gold_custom_page_views_weekly,
   gold_city_browsing_depth_weekly,
   gold_funnel_user,
-  gold_funnel_events
+  gold_funnel_events,
+  gold_events_hourly
 };

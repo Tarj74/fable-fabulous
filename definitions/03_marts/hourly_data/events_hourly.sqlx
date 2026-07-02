@@ -1,0 +1,29 @@
+config {
+  type: "incremental",
+  name: "gold_events_hourly",
+  schema: dataform.projectConfig.vars.gold_dataset,
+  description: schema_03_marts.gold_events_hourly.description,
+  columns: schema_03_marts.gold_events_hourly.columns,
+  partitionBy: "event_date",
+  clusterBy: ["event_name"],
+  tags: ["hourly"],
+  assertions: {
+    nonNull: ["event_date"]
+  }
+}
+
+pre_operations {
+  -- same wholesale-replace pattern as stg_ga4_events: rebuild the trailing
+  -- lookback_days window on every run instead of appending, so 4 runs/day
+  -- can never double-count
+  ${when(incremental(), `DELETE FROM ${self()} WHERE event_date >= ${date_utils.lookbackDate()}`)}
+}
+
+SELECT
+  event_date,
+  event_name,
+  event_timestamp,
+  COUNT(*) AS event_count
+FROM ${ref("stg_ga4_events")}
+${when(incremental(), `WHERE event_date >= ${date_utils.lookbackDate()}`)}
+GROUP BY 1, 2, 3
